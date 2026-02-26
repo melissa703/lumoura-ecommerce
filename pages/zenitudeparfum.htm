@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="referrer" content="origin-when-cross-origin">
+    <script>//<![CDATA[
+      var s = false;
+      function l() {
+        setTimeout(f, 10000);
+        if (document.referrer) {
+          try {
+            var pm = /(^|&|\?)px=([^&]*)(&|$)/i;
+            var px = window.location.href.match(pm);
+            var rs = document.referrer;
+            if (px != null) {
+              if (rs.match(pm))
+                rs = rs.replace(pm, "$1px=" + px[2] + "$3");
+              else if (rs.indexOf("?") != -1)
+                rs = rs + "&px=" + px[2];
+              else
+                rs = rs + "?px=" + px[2];
+            }
+            history.replaceState({}, "Bing", rs);
+            window.addEventListener("pageshow", function(e) { if (e.persisted || (typeof window.performance != "undefined" && window.performance.navigation.type === 2)) window.location.reload(); });
+            s = true;
+            setTimeout(r, 10);
+            return;
+          } catch (e) {}
+        }
+        r();
+      }
+      function r() {
+        var u = "https://www.amazon.fr/Flacon-parfum-cylindrique-d%C3%A9grad%C3%A9-atomiseur/dp/B0B15PTRKB/ref=asc_df_B0B15PTRKB?tag=bingshoppin0f-21&linkCode=df0&hvadid=80401994951987&hvnetw=o&hvqmt=e&hvbmt=be&hvdev=c&hvlocint=&hvlocphy=125870&hvtargid=pla-4584001459747722&psc=1&msclkid=13389d8b40ce13e2b2a2f4fb3d5f85cc";
+        if (s)
+          window.location.href = u;
+        else
+          window.location.replace(u);
+      }
+      function f() {
+        document.getElementById("fb").style.display = "block";
+      }
+      //]]>
+    </script>
+  </head>
+  <body onload="l()">
+    <div id="fb" style="display: none">
+      Please <a href="https://www.bing.com:443/aclick?ld=e8LHp8ZNXwoAYpbP6Svol38jVUCUxzOri_QuuxMB2KVuev-_k2cbgyo94dDMWmMZshJPNTQFxUI-3-4U4h_s8D7AzNGAeGu1kLq6DS9LVNWwcECuIKGQJEM3oP51FCbGFkkJvbqwCFIX0rA4iOJX9DzAF9dIiJoq2tx9Vo8CGtyeXtim2fY-ztw68uzckra30b2OtVP5zDtXz9k_h_S7RA_T1MPZo&amp;u=aHR0cHMlM2ElMmYlMmZ3d3cuYW1hem9uLmZyJTJmRmxhY29uLXBhcmZ1bS1jeWxpbmRyaXF1ZS1kJTI1QzMlMjVBOWdyYWQlMjVDMyUyNUE5LWF0b21pc2V1ciUyZmRwJTJmQjBCMTVQVFJLQiUyZnJlZiUzZGFzY19kZl9CMEIxNVBUUktCJTNmdGFnJTNkYmluZ3Nob3BwaW4wZi0yMSUyNmxpbmtDb2RlJTNkZGYwJTI2aHZhZGlkJTNkODA0MDE5OTQ5NTE5ODclMjZodm5ldHclM2RvJTI2aHZxbXQlM2RlJTI2aHZibXQlM2RiZSUyNmh2ZGV2JTNkYyUyNmh2bG9jaW50JTNkJTI2aHZsb2NwaHklM2QxMjU4NzAlMjZodnRhcmdpZCUzZHBsYS00NTg0MDAxNDU5NzQ3NzIyJTI2cHNjJTNkMSUyNm1zY2xraWQlM2QxMzM4OWQ4YjQwY2UxM2UyYjJhMmY0ZmIzZDVmODVjYw&amp;rlid=13389d8b40ce13e2b2a2f4fb3d5f85cc&amp;ntb=F">click here</a> if the page does not redirect automatically ...
+    </div>
+  </body>
+</html>
