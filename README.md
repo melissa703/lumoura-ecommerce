@@ -1,44 +1,46 @@
-# Lumoura — Luxury Perfume E-commerce
+# Lumoura 🌸
 
-Lumoura is a perfume e-commerce website designed to provide an elegant shopping experience and help users discover fragrances that match their preferences.
+Lumoura is a luxury perfume e-commerce website that offers an elegant
+shopping experience and helps users **discover fragrances that match
+their preferences** through a personalized recommendation quiz.
 
-## Features
+Built with PHP and MySQL as part of my BTS SIO (SLAM) studies.
 
-- Perfume catalogue and product details
-- Personalized perfume recommendation quiz
-- Fragrance discovery based on user preferences
-- Shopping cart and customer account features
-- Responsive interface for a smooth shopping experience
+![Home page](assets/screenshots/home.png)
+![Recommendation quiz](assets/screenshots/quiz.png)
 
-## Technologies
+## ✨ Features
+- Perfume catalogue with detailed product pages
+- **Personalized recommendation quiz**: [X questions on scent family,
+  intensity, occasion... → matching perfumes ranked by score]
+- Shopping cart and customer accounts (registration, login)
+- [Order management / admin panel, if it exists]
+- Responsive interface built with Bootstrap
 
-- PHP
-- MySQL
-- HTML5
-- CSS3
-- JavaScript
-- Bootstrap
+## 🛠️ Technologies
+PHP · MySQL · HTML5 · CSS3 · JavaScript · Bootstrap · Composer · Git
 
-## Project Structure
+## 🔒 Security
+- Passwords hashed with `password_hash()`
+- Prepared statements (PDO) against SQL injection
+- [Session handling, input validation...]
 
-- `assets/` — Stylesheets, scripts, images and other resources
-- `includes/` — Shared components and configuration files
-- `pages/` — Website pages
-- `vendor/` — PHP dependencies managed with Composer
+## 🗂️ Project structure
+- `assets/`: stylesheets, scripts, images
+- `includes/`: shared components and configuration
+- `pages/`: website pages
+- `database/`: SQL file to create the database
 
-## Getting Started
+## 🚀 Getting started
+1. Clone the repository
+2. Run `composer install`
+3. Create a database and import `database/lumoura.sql`
+4. Copy `includes/config.example.php` to `includes/config.php`
+   and enter your database credentials
+5. Start XAMPP/WAMP and open `http://localhost/lumoura`
 
-1. Clone this repository.
-2. Install the dependencies with Composer.
-3. Configure your local PHP and MySQL environment.
-4. Import the database using the provided SQL file, after checking its contents.
-5. Configure the database connection.
-6. Start your local web server and open the project in your browser.
-
-## Project Goals
-
-This project is part of my web development learning journey. It allows me to practise PHP development, database integration, e-commerce functionality and personalized product recommendations.
-
----
-
-**Status:** In development.
+## 🎯 What I learned
+- Designing a relational database for an e-commerce site
+- Building a recommendation logic in PHP
+- Securing authentication and database access
+- [Something specific you are proud of]
