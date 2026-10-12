@@ -11,8 +11,7 @@
 //   4. Code correct → session ouverte → redirection (admin ou accueil)
 // ============================================================
 
-session_start();
-
+// ⚠️ PAS de session_start() ici — déjà fait dans config.php
 require_once '../includes/config.php';
 require_once '../includes/db.php';
 require_once '../includes/functions.php';
@@ -58,11 +57,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['verifier_otp'])) {
         // Nettoyage : les données OTP ne sont plus nécessaires
         unset($_SESSION['otp_login_pending']);
 
-        // Redirection selon le rôle (identique à l'ancienne logique de connexion.php)
+        // Redirection selon le rôle
         if ($pending['role'] === 'admin') {
-            header('Location: profil.php');
+            header('Location: ' . SITE_URL . 'pages/admin/admin.php');
         } else {
-            header('Location: index.php');
+            header('Location: ' . SITE_URL . 'pages/index.php');
         }
         exit();
 

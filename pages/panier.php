@@ -4,6 +4,12 @@ require_once '../includes/config.php';
 require_once '../includes/db.php';
 require_once '../includes/functions.php';
 
+// ✅ CORRECTION : Constante centralisée pour la livraison gratuite
+// Modifier ici pour que panier.php et commande.php soient toujours cohérents
+if (!defined('LIVRAISON_GRATUITE_SEUIL')) {
+    define('LIVRAISON_GRATUITE_SEUIL', 150);
+}
+
 // Vérifier si l'utilisateur est connecté
 if (!isLoggedIn()) {
     $_SESSION['login_redirect'] = 'Veuillez vous connecter pour accéder à votre panier.';
@@ -19,33 +25,51 @@ $error_message = '';
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['action'] ?? '';
     $product_id = intval($_POST['product_id'] ?? 0);
-    
+    $format_id  = intval($_POST['format_id'] ?? 0); // format (30/50/100 ml) de la ligne du panier
+
     switch ($action) {
         case 'update':
             $quantity = intval($_POST['quantity'] ?? 0);
             if ($quantity < 1) $quantity = 1;
-            
+
+            // ✅ CORRECTION : Vérifier le stock avant de mettre à jour la quantité
             try {
-                $query = "UPDATE panier SET quantite = ? WHERE id_utilisateur = ? AND id_produit = ?";
+                $stock_stmt = $pdo->prepare("SELECT stock FROM produits WHERE id_produit = ?");
+                $stock_stmt->execute([$product_id]);
+                $produit = $stock_stmt->fetch();
+
+                // Le stock est commun à tous les formats d'un parfum :
+                // on retire ce qui est déjà dans le panier dans les AUTRES formats
+                $other_stmt = $pdo->prepare("SELECT COALESCE(SUM(quantite), 0) FROM panier WHERE id_utilisateur = ? AND id_produit = ? AND id_format != ?");
+                $other_stmt->execute([$user_id, $product_id, $format_id]);
+                $autres_formats = (int) $other_stmt->fetchColumn();
+                $stock_dispo    = $produit ? max(1, $produit['stock'] - $autres_formats) : $quantity;
+
+                if ($produit && $quantity > $stock_dispo) {
+                    $quantity = $stock_dispo;
+                    $success_message = 'Quantité ajustée au stock disponible (' . $produit['stock'] . ').';
+                }
+
+                $query = "UPDATE panier SET quantite = ? WHERE id_utilisateur = ? AND id_produit = ? AND id_format = ?";
                 $stmt = $pdo->prepare($query);
-                $stmt->execute([$quantity, $user_id, $product_id]);
-                $success_message = 'Quantité mise à jour.';
+                $stmt->execute([$quantity, $user_id, $product_id, $format_id]);
+                if (empty($success_message)) $success_message = 'Quantité mise à jour.';
             } catch (PDOException $e) {
                 $error_message = 'Erreur lors de la mise à jour : ' . $e->getMessage();
             }
             break;
-            
+
         case 'remove':
             try {
-                $query = "DELETE FROM panier WHERE id_utilisateur = ? AND id_produit = ?";
+                $query = "DELETE FROM panier WHERE id_utilisateur = ? AND id_produit = ? AND id_format = ?";
                 $stmt = $pdo->prepare($query);
-                $stmt->execute([$user_id, $product_id]);
+                $stmt->execute([$user_id, $product_id, $format_id]);
                 $success_message = 'Article supprimé du panier.';
             } catch (PDOException $e) {
                 $error_message = 'Erreur lors de la suppression : ' . $e->getMessage();
             }
             break;
-            
+
         case 'clear':
             try {
                 $query = "DELETE FROM panier WHERE id_utilisateur = ?";
@@ -57,7 +81,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             break;
     }
-    
+
     // Redirection pour éviter la resoumission
     $referer = $_SERVER['HTTP_REFERER'] ?? 'panier.php';
     header("Location: $referer");
@@ -72,9 +96,13 @@ try {
             c.nom_categorie,
             pan.quantite,
             pan.id_panier,
-            pan.date_ajout
+            pan.date_ajout,
+            pan.id_format,
+            f.prix      AS prix_format,   -- prix du FORMAT choisi (et non produits.prix)
+            f.volume_ml AS volume_format  -- contenance choisie (30 / 50 / 100 ml)
         FROM panier pan
         JOIN produits p ON pan.id_produit = p.id_produit
+        JOIN produit_formats f ON f.id_format = pan.id_format
         LEFT JOIN categories c ON p.id_categorie = c.id_categorie
         WHERE pan.id_utilisateur = ?
         ORDER BY pan.date_ajout DESC
@@ -82,26 +110,40 @@ try {
     $stmt = $pdo->prepare($query);
     $stmt->execute([$user_id]);
     $cart_items = $stmt->fetchAll(PDO::FETCH_ASSOC);
-    
+
+    // ✅ CORRECTION : Détecter les problèmes de stock pour chaque article
+    $stock_warnings = [];
+    $qte_par_produit = [];
+    foreach ($cart_items as $item) {
+        $qte_par_produit[$item['id_produit']] = ($qte_par_produit[$item['id_produit']] ?? 0) + $item['quantite'];
+    }
+    foreach ($cart_items as $item) {
+        if ($item['stock'] <= 0) {
+            $stock_warnings[$item['id_produit']] = 'rupture';
+        } elseif ($qte_par_produit[$item['id_produit']] > $item['stock']) {
+            $stock_warnings[$item['id_produit']] = 'insuffisant';
+        }
+    }
+
     // Calcul des totaux
     $subtotal = 0;
     $total_items = 0;
     $shipping_cost = 0;
-    
+
     foreach ($cart_items as $item) {
-        $price = $item['prix'];
+        $price = $item['prix_format'];
         $discount = $item['promotion_pourcentage'];
         $final_price = $discount > 0 ? $price * (1 - $discount / 100) : $price;
         $item_total = $final_price * $item['quantite'];
-        
+
         $subtotal += $item_total;
         $total_items += $item['quantite'];
     }
-    
-    // Frais de port : gratuit à partir de 150€, sinon 5.90€
-    $shipping_cost = ($subtotal >= 150 || $subtotal == 0) ? 0 : 5.90;
+
+    // ✅ CORRECTION : Utilisation de la constante centralisée (cohérent avec commande.php)
+    $shipping_cost = ($subtotal >= LIVRAISON_GRATUITE_SEUIL || $subtotal == 0) ? 0 : 5.90;
     $total = $subtotal + $shipping_cost;
-    
+
 } catch (PDOException $e) {
     $error_message = 'Erreur lors du chargement du panier : ' . $e->getMessage();
     $cart_items = [];
@@ -109,6 +151,7 @@ try {
     $total_items = 0;
     $total = 0;
     $shipping_cost = 0;
+    $stock_warnings = [];
 }
 
 $pageTitle = "Mon Panier - Lumoura";
@@ -135,10 +178,18 @@ include '../includes/header.php';
             <i class="fas fa-exclamation-circle"></i> <?php echo htmlspecialchars($error_message); ?>
         </div>
     <?php endif; ?>
-    
+
     <?php if ($success_message): ?>
         <div class="alert alert-success" style="padding: 15px; margin-bottom: 20px; background: #e6ffe6; border: 1px solid #b3ffb3; border-radius: 6px; color: #006600; text-align: center;">
             <i class="fas fa-check-circle"></i> <?php echo htmlspecialchars($success_message); ?>
+        </div>
+    <?php endif; ?>
+
+    <!-- ✅ CORRECTION : Alerte globale si des articles ont des problèmes de stock -->
+    <?php if (!empty($stock_warnings)): ?>
+        <div style="padding: 15px; margin-bottom: 20px; background: #fff3cd; border: 1px solid #ffc107; border-radius: 8px; color: #856404;">
+            <i class="fas fa-exclamation-triangle" style="margin-right: 8px;"></i>
+            <strong>Attention :</strong> certains articles de votre panier ont des problèmes de stock. Veuillez les vérifier avant de passer commande.
         </div>
     <?php endif; ?>
 
@@ -202,14 +253,15 @@ include '../includes/header.php';
                             </button>
                         </form>
                     </div>
-                    
+
                     <div class="items-container">
-                        <?php foreach ($cart_items as $item): 
-                            $price = $item['prix'];
+                        <?php foreach ($cart_items as $item):
+                            $price = $item['prix_format'];
                             $discount = $item['promotion_pourcentage'];
                             $final_price = $discount > 0 ? $price * (1 - $discount / 100) : $price;
                             $item_total = $final_price * $item['quantite'];
                             $image = $item['image_url'] ?: 'https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=800&q=80';
+                            $has_stock_issue = isset($stock_warnings[$item['id_produit']]);
                         ?>
                             <div class="cart-item" style="
                                 display: grid;
@@ -218,6 +270,7 @@ include '../includes/header.php';
                                 padding: 25px 0;
                                 border-bottom: 1px solid #eee;
                                 align-items: center;
+                                <?php echo $has_stock_issue ? 'background: #fff8f8; border-radius: 8px; padding: 20px;' : ''; ?>
                             ">
                                 <!-- Image -->
                                 <div>
@@ -226,9 +279,10 @@ include '../includes/header.php';
                                         height: 100px;
                                         object-fit: cover;
                                         border-radius: 10px;
+                                        <?php echo $has_stock_issue ? 'opacity: 0.6;' : ''; ?>
                                     ">
                                 </div>
-                                
+
                                 <!-- Informations produit -->
                                 <div>
                                     <h4 style="margin: 0 0 8px 0; font-size: 1.1em;">
@@ -237,7 +291,7 @@ include '../includes/header.php';
                                         </a>
                                     </h4>
                                     <p style="margin: 0 0 8px 0; color: #777; font-size: 0.9em;">
-                                        <?php echo htmlspecialchars($item['marque']); ?> • <?php echo htmlspecialchars($item['nom_categorie']); ?>
+                                        <?php echo htmlspecialchars($item['marque']); ?> • <?php echo htmlspecialchars($item['nom_categorie']); ?> • <strong><?php echo (int)$item['volume_format']; ?> ml</strong>
                                     </p>
                                     <?php if ($discount > 0): ?>
                                         <div style="font-size: 0.9em;">
@@ -247,13 +301,34 @@ include '../includes/header.php';
                                     <?php else: ?>
                                         <div style="font-weight: bold; color: #222;"><?php echo formatPrice($final_price); ?></div>
                                     <?php endif; ?>
+
+                                    <!-- ✅ CORRECTION : Badge d'alerte stock sous le prix -->
+                                    <?php if (isset($stock_warnings[$item['id_produit']])): ?>
+                                        <?php if ($stock_warnings[$item['id_produit']] === 'rupture'): ?>
+                                            <div style="margin-top: 8px; color: #e63946; font-size: 0.85em; font-weight: bold;">
+                                                <i class="fas fa-times-circle"></i> Rupture de stock — sera retiré au paiement
+                                            </div>
+                                        <?php else: ?>
+                                            <div style="margin-top: 8px; color: #f39c12; font-size: 0.85em; font-weight: bold;">
+                                                <i class="fas fa-exclamation-triangle"></i> Seulement <?php echo $item['stock']; ?> disponible(s)
+                                            </div>
+                                        <?php endif; ?>
+                                    <?php else: ?>
+                                        <!-- ✅ CORRECTION : Afficher le stock restant si faible -->
+                                        <?php if ($item['stock'] > 0 && $item['stock'] <= $item['seuil_alerte']): ?>
+                                            <div style="margin-top: 8px; color: #f39c12; font-size: 0.82em;">
+                                                <i class="fas fa-fire"></i> Plus que <?php echo $item['stock']; ?> en stock !
+                                            </div>
+                                        <?php endif; ?>
+                                    <?php endif; ?>
                                 </div>
-                                
+
                                 <!-- Quantité -->
                                 <div>
                                     <form method="POST" action="" class="quantity-form" style="display: flex; align-items: center; gap: 10px;">
                                         <input type="hidden" name="action" value="update">
                                         <input type="hidden" name="product_id" value="<?php echo $item['id_produit']; ?>">
+                                        <input type="hidden" name="format_id" value="<?php echo $item['id_format']; ?>">
                                         <button type="button" class="qty-btn minus" onclick="this.parentNode.querySelector('input[name=quantity]').stepDown()" style="
                                             width: 35px;
                                             height: 35px;
@@ -263,8 +338,9 @@ include '../includes/header.php';
                                             cursor: pointer;
                                             font-size: 1.2em;
                                         ">-</button>
-                                        
-                                        <input type="number" name="quantity" value="<?php echo $item['quantite']; ?>" min="1" max="99" style="
+
+                                        <input type="number" name="quantity" value="<?php echo $item['quantite']; ?>"
+                                               min="1" max="<?php echo max(1, $item['stock']); ?>" style="
                                             width: 60px;
                                             text-align: center;
                                             padding: 8px;
@@ -272,7 +348,7 @@ include '../includes/header.php';
                                             border-radius: 6px;
                                             font-size: 1em;
                                         ">
-                                        
+
                                         <button type="button" class="qty-btn plus" onclick="this.parentNode.querySelector('input[name=quantity]').stepUp()" style="
                                             width: 35px;
                                             height: 35px;
@@ -282,7 +358,7 @@ include '../includes/header.php';
                                             cursor: pointer;
                                             font-size: 1.2em;
                                         ">+</button>
-                                        
+
                                         <button type="submit" title="Mettre à jour" style="
                                             background: none;
                                             border: none;
@@ -295,7 +371,7 @@ include '../includes/header.php';
                                         </button>
                                     </form>
                                 </div>
-                                
+
                                 <!-- Total et suppression -->
                                 <div style="text-align: right;">
                                     <div style="font-weight: bold; font-size: 1.2em; margin-bottom: 10px; color: #3a2c1f;">
@@ -304,6 +380,7 @@ include '../includes/header.php';
                                     <form method="POST" action="" onsubmit="return confirm('Supprimer cet article du panier ?');" style="margin: 0;">
                                         <input type="hidden" name="action" value="remove">
                                         <input type="hidden" name="product_id" value="<?php echo $item['id_produit']; ?>">
+                                        <input type="hidden" name="format_id" value="<?php echo $item['id_format']; ?>">
                                         <button type="submit" style="
                                             background: none;
                                             border: none;
@@ -324,19 +401,19 @@ include '../includes/header.php';
                 </div>
             <?php endif; ?>
         </div>
-        
+
         <!-- Sidebar de résumé et paiement -->
         <?php if (!empty($cart_items)): ?>
         <div class="cart-summary" style="position: sticky; top: 30px; height: fit-content;">
             <div style="background: white; border-radius: 16px; padding: 30px; box-shadow: 0 8px 25px rgba(0,0,0,0.1);">
                 <h3 style="margin: 0 0 25px 0; font-size: 1.4em; color: #3a2c1f;">Résumé de la commande</h3>
-                
+
                 <div class="summary-details" style="margin-bottom: 30px;">
                     <div style="display: flex; justify-content: space-between; margin-bottom: 15px;">
                         <span>Sous-total (<?php echo $total_items; ?> article<?php echo $total_items > 1 ? 's' : ''; ?>)</span>
                         <span style="font-weight: bold;"><?php echo formatPrice($subtotal); ?></span>
                     </div>
-                    
+
                     <div style="display: flex; justify-content: space-between; margin-bottom: 15px;">
                         <span>Frais de livraison</span>
                         <span>
@@ -347,14 +424,15 @@ include '../includes/header.php';
                             <?php endif; ?>
                         </span>
                     </div>
-                    
-                    <?php if ($subtotal < 150 && $subtotal > 0): ?>
+
+                    <!-- ✅ CORRECTION : Utilise la constante centralisée -->
+                    <?php if ($subtotal < LIVRAISON_GRATUITE_SEUIL && $subtotal > 0): ?>
                         <div style="background: #e6f7ff; padding: 12px; border-radius: 8px; margin-bottom: 20px; font-size: 0.9em;">
                             <i class="fas fa-shipping-fast" style="color: #2a9d8f; margin-right: 8px;"></i>
-                            Ajoutez <strong><?php echo formatPrice(150 - $subtotal); ?></strong> pour bénéficier de la livraison gratuite !
+                            Ajoutez <strong><?php echo formatPrice(LIVRAISON_GRATUITE_SEUIL - $subtotal); ?></strong> pour bénéficier de la livraison gratuite !
                         </div>
                     <?php endif; ?>
-                    
+
                     <div style="border-top: 2px solid #eee; padding-top: 20px; margin-top: 20px;">
                         <div style="display: flex; justify-content: space-between; font-size: 1.3em; font-weight: bold;">
                             <span>Total</span>
@@ -365,7 +443,7 @@ include '../includes/header.php';
                         </p>
                     </div>
                 </div>
-                
+
                 <!-- Boutons d'action -->
                 <div class="cart-actions" style="display: flex; flex-direction: column; gap: 15px;">
                     <a href="commande.php" class="btn-checkout" style="
@@ -382,7 +460,7 @@ include '../includes/header.php';
                         <i class="fas fa-lock" style="margin-right: 10px;"></i>
                         Procéder au paiement
                     </a>
-                    
+
                     <a href="catalogue.php" class="btn-continue" style="
                         background: white;
                         color: #3a2c1f;
@@ -398,7 +476,7 @@ include '../includes/header.php';
                         <i class="fas fa-arrow-left" style="margin-right: 10px;"></i>
                         Continuer mes achats
                     </a>
-                    
+
                     <div style="text-align: center; margin-top: 20px; padding-top: 20px; border-top: 1px solid #eee;">
                         <p style="font-size: 0.9em; color: #777; margin-bottom: 15px;">
                             Paiement sécurisé par
@@ -412,7 +490,7 @@ include '../includes/header.php';
                     </div>
                 </div>
             </div>
-            
+
             <!-- Garanties -->
             <div style="background: white; border-radius: 16px; padding: 25px; margin-top: 30px; box-shadow: 0 8px 25px rgba(0,0,0,0.1);">
                 <h4 style="margin: 0 0 20px 0; font-size: 1.2em; color: #3a2c1f;">
@@ -444,24 +522,22 @@ include '../includes/header.php';
 </div>
 
 <script>
-// Fonction pour mettre à jour la quantité avec un petit effet visuel
 document.addEventListener('DOMContentLoaded', function() {
     // Animation des boutons quantité
     const qtyButtons = document.querySelectorAll('.qty-btn');
     qtyButtons.forEach(btn => {
         btn.addEventListener('click', function() {
-            // Petite animation
             this.style.transform = 'scale(0.9)';
             setTimeout(() => {
                 this.style.transform = 'scale(1)';
             }, 150);
         });
     });
-    
+
     // Auto-soumission des formulaires de quantité après 1.5s d'inactivité
     const quantityInputs = document.querySelectorAll('input[name="quantity"]');
     let timeout;
-    
+
     quantityInputs.forEach(input => {
         input.addEventListener('change', function() {
             const form = this.closest('.quantity-form');

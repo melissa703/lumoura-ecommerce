@@ -9,7 +9,12 @@ require_once '../includes/db.php';
 require_once '../includes/functions.php';
 
 if (isset($_SESSION['user_id'])) {
-    header('Location: index.php');
+    // Redirection selon le rôle si déjà connecté
+    if (isset($_SESSION['role']) && $_SESSION['role'] === 'admin') {
+        header('Location: ' . SITE_URL . 'pages/admin/profil.php');
+    } else {
+        header('Location: ' . SITE_URL . 'pages/index.php');
+    }
     exit();
 }
 

@@ -114,7 +114,7 @@ include '../includes/header.php';
             </h1>
             <p style="color: #888; font-size: 1em;">Membre depuis le <?php echo date('d/m/Y', strtotime($user['date_inscription'])); ?></p>
             <?php if ($user['role'] === 'admin'): ?>
-                <a href="admin.php" style="display: inline-block; margin-top: 10px; background: #3a2c1f; color: #d4a017; padding: 8px 20px; border-radius: 20px; text-decoration: none; font-weight: bold; font-size: 0.9em;">
+                <a href="admin/admin.php" style="display: inline-block; margin-top: 10px; background: #3a2c1f; color: #d4a017; padding: 8px 20px; border-radius: 20px; text-decoration: none; font-weight: bold; font-size: 0.9em;">
                     <i class="fas fa-cog" style="margin-right: 6px;"></i>Accéder au panneau Admin
                 </a>
             <?php endif; ?>

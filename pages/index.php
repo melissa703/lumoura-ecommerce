@@ -1027,6 +1027,258 @@ include '../includes/header.php';
 </section>
 
 <!-- ==========================================
+     SECTION QUIZ OLFACTIF
+     ==========================================
+     Invite à faire le quiz (pages/quiz.php).
+     Les photos viennent de la table produits (requête sans paramètre
+     utilisateur) ; si la base ne répond pas, la section s'affiche sans photos.
+     ========================================== -->
+<?php
+$hqVisuels = [];
+try {
+    $hqStmt = $pdo->prepare(
+        "SELECT id_produit, nom, image_url
+         FROM produits
+         WHERE id_produit IN (6, 3, 5) AND stock > 0
+           AND image_url IS NOT NULL AND image_url <> ''"
+    );
+    $hqStmt->execute();
+    $hqParId = [];
+    foreach ($hqStmt->fetchAll(PDO::FETCH_ASSOC) as $hqRow) {
+        $hqParId[(int)$hqRow['id_produit']] = $hqRow;
+    }
+    foreach ([6, 3, 5] as $hqId) {            // ordre d'affichage voulu
+        if (isset($hqParId[$hqId])) { $hqVisuels[] = $hqParId[$hqId]; }
+    }
+} catch (PDOException $e) {
+    $hqVisuels = [];
+}
+$hqNb = count($hqVisuels);
+?>
+<style>
+/* --- QUIZ OLFACTIF (accueil) : préfixe hq- --- */
+.hq { position: relative; overflow: hidden; isolation: isolate; }
+.hq::before {
+    content: "";
+    position: absolute;
+    right: -10%; top: 50%;
+    width: 780px; height: 780px;
+    transform: translateY(-50%);
+    background: radial-gradient(closest-side, rgba(212,160,23,0.20), transparent);
+    z-index: -1;
+    pointer-events: none;
+}
+.hq-inner {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 0 30px;
+    display: grid;
+    grid-template-columns: 5fr 6fr;
+    gap: 64px;
+    align-items: center;
+}
+.hq-text .section-eyebrow { margin-bottom: 22px; }
+.hq-title {
+    font-family: 'Cormorant Garamond', 'Playfair Display', serif;
+    font-weight: 300;
+    font-size: clamp(2.3em, 4.6vw, 3.8em);
+    line-height: 1.12;
+    letter-spacing: 0.04em;
+    color: #fff8f0;
+    margin: 0 0 20px;
+}
+.hq-title em {
+    color: #e8c56a;
+    font-style: italic;
+    text-shadow: 0 0 40px rgba(232,197,106,0.35);
+}
+.hq-lead {
+    color: rgba(255,255,255,0.72);
+    font-size: 1.05em;
+    line-height: 1.8;
+    max-width: 470px;
+    margin: 0 0 34px;
+}
+
+.hq-btn {
+    --bx: 0px; --by: 0px;
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+    overflow: hidden;
+    padding: 16px 38px;
+    border-radius: 50px;
+    text-decoration: none;
+    font-weight: 600;
+    font-size: 0.95em;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: #fff;
+    background: linear-gradient(135deg, #b8860b, #d4a017 50%, #e8c56a);
+    box-shadow: 0 12px 28px -10px rgba(212,160,23,0.7), inset 0 1px 0 rgba(255,255,255,0.35);
+    transform: translate(var(--bx), var(--by));
+    transition: box-shadow .4s cubic-bezier(.22,.8,.24,1), transform .25s ease-out;
+}
+.hq-btn::before {
+    content: "";
+    position: absolute;
+    inset: 0 auto 0 -60%;
+    width: 45%;
+    background: linear-gradient(105deg, transparent, rgba(255,255,255,0.55), transparent);
+    transform: skewX(-20deg);
+    transition: left .8s cubic-bezier(.22,.8,.24,1);
+}
+.hq-btn i { transition: transform .4s cubic-bezier(.22,.8,.24,1); }
+.hq-btn:hover { color: #fff; box-shadow: 0 20px 40px -12px rgba(212,160,23,0.85), 0 0 0 6px rgba(212,160,23,0.18), inset 0 1px 0 rgba(255,255,255,0.45); }
+.hq-btn:hover::before { left: 120%; }
+.hq-btn:hover i { transform: translateX(5px); }
+.hq-btn:active { transform: translate(var(--bx), var(--by)) scale(.97); }
+.hq-btn:focus-visible { outline: 2px solid #e8c56a; outline-offset: 4px; }
+
+.hq-perks {
+    list-style: none;
+    margin: 30px 0 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 24px;
+    font-size: 0.85em;
+    color: rgba(255,255,255,0.6);
+}
+.hq-perks li::before { content: "\2713"; color: #d4a017; font-weight: 700; margin-right: 8px; }
+
+/* Mosaïque de photos en 3D */
+.hq-stage {
+    display: grid;
+    grid-template-columns: 1.1fr 1fr;
+    grid-template-rows: 1fr 1fr;
+    gap: 14px;
+    height: 500px;
+    perspective: 1400px;
+}
+.hq-stage-n1, .hq-stage-n2 { grid-template-columns: repeat(auto-fit, minmax(0, 1fr)); grid-template-rows: 1fr; }
+.hq-stage-n3 .hq-card-1 { grid-row: 1 / span 2; }
+
+.hq-card {
+    --rx: 0deg; --ry: 0deg; --mx: 50%; --my: 50%; --s: 1;
+    position: relative;
+    margin: 0;
+    overflow: hidden;
+    border-radius: 16px;
+    background: #1a1009;
+    box-shadow: 0 24px 50px -28px rgba(0,0,0,0.9), 0 0 0 1px rgba(232,197,106,0.12);
+    transform: perspective(1000px) rotateX(var(--rx)) rotateY(var(--ry)) scale(var(--s));
+    transition: transform .7s cubic-bezier(.22,.8,.24,1), box-shadow .6s cubic-bezier(.22,.8,.24,1);
+    will-change: transform;
+}
+.hq-card img {
+    width: 100%; height: 100%;
+    object-fit: cover;
+    display: block;
+    transition: transform 1.3s cubic-bezier(.22,.8,.24,1);
+}
+.hq-card::before {   /* dégradé sous la légende */
+    content: "";
+    position: absolute; inset: 0;
+    background: linear-gradient(to top, rgba(14,10,6,0.72), transparent 50%);
+    z-index: 1;
+}
+.hq-card::after {    /* reflet doré qui suit le curseur */
+    content: "";
+    position: absolute; inset: 0;
+    z-index: 2;
+    pointer-events: none;
+    background: radial-gradient(380px circle at var(--mx) var(--my), rgba(255,244,214,0.28), transparent 55%);
+    opacity: 0;
+    transition: opacity .4s ease;
+}
+.hq-card.is-tilting {
+    --s: 1.035;
+    transition: transform .12s ease-out, box-shadow .6s cubic-bezier(.22,.8,.24,1);
+    box-shadow: 0 40px 70px -28px rgba(0,0,0,0.95), 0 0 0 1px rgba(232,197,106,0.6), 0 0 50px -8px rgba(212,160,23,0.5);
+}
+.hq-card.is-tilting::after { opacity: 1; }
+.hq-card.is-tilting img { transform: scale(1.08); }
+.hq-card figcaption {
+    position: absolute;
+    z-index: 3;
+    left: 16px; bottom: 14px;
+    font-family: 'Cinzel', serif;
+    font-size: 0.72rem;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: #fff;
+}
+.hq-card figcaption::after {
+    content: "";
+    display: block;
+    width: 0; height: 1px;
+    margin-top: 8px;
+    background: #e8c56a;
+    transition: width .6s cubic-bezier(.22,.8,.24,1);
+}
+.hq-card.is-tilting figcaption::after { width: 56px; }
+
+/* Apparition au scroll (ajoutée par le JS ; sans JS tout reste visible) */
+.hq.hq-anim:not(.is-in) .hq-text > * { opacity: 0; transform: translateY(24px); }
+.hq.hq-anim:not(.is-in) .hq-card { opacity: 0; transform: perspective(1000px) translateY(46px) rotateX(10deg); }
+.hq .hq-text > * { transition: opacity .8s cubic-bezier(.22,.8,.24,1), transform .8s cubic-bezier(.22,.8,.24,1); }
+.hq .hq-text > *:nth-child(2) { transition-delay: .1s; }
+.hq .hq-text > *:nth-child(3) { transition-delay: .2s; }
+.hq .hq-text > *:nth-child(4) { transition-delay: .3s; }
+.hq .hq-text > *:nth-child(5) { transition-delay: .4s; }
+.hq .hq-card-1 { transition-delay: .15s; }
+.hq .hq-card-2 { transition-delay: .3s; }
+.hq .hq-card-3 { transition-delay: .45s; }
+.hq-card.is-tilting { transition-delay: 0s; }
+
+@media (max-width: 900px) {
+    .hq-inner { grid-template-columns: 1fr; gap: 44px; }
+    .hq-text { text-align: center; }
+    .hq-lead { margin-left: auto; margin-right: auto; }
+    .hq-perks { justify-content: center; }
+    .hq-stage { height: 380px; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .hq-card, .hq-card.is-tilting { transform: none; transition: none; }
+    .hq-btn::before { display: none; }
+}
+</style>
+
+<section class="home-section bg-dark-luxury hq" id="quizAccueil" aria-labelledby="hq-title">
+    <div class="hq-inner">
+        <div class="hq-text">
+            <div class="section-eyebrow">Quiz olfactif</div>
+            <h2 class="hq-title" id="hq-title">Quel parfum <em>vous ressemble</em>&nbsp;?</h2>
+            <p class="hq-lead">
+                Quatre questions, moins d'une minute. Nous comparons vos goûts aux parfums
+                réellement disponibles chez Lumoura et vous proposons jusqu'à trois recommandations.
+            </p>
+            <a href="quiz.php" class="hq-btn">Commencer le quiz <i class="fas fa-arrow-right"></i></a>
+            <ul class="hq-perks">
+                <li>Sans inscription</li>
+                <li>Parfums en stock</li>
+                <li>Prix exacts</li>
+            </ul>
+        </div>
+
+        <?php if ($hqNb > 0): ?>
+        <div class="hq-stage hq-stage-n<?php echo $hqNb; ?>">
+            <?php foreach ($hqVisuels as $hqI => $hqV): ?>
+                <figure class="hq-card hq-card-<?php echo $hqI + 1; ?>">
+                    <img src="<?php echo htmlspecialchars($hqV['image_url']); ?>"
+                         alt="Flacon <?php echo htmlspecialchars($hqV['nom']); ?>"
+                         loading="lazy">
+                    <figcaption><?php echo htmlspecialchars($hqV['nom']); ?></figcaption>
+                </figure>
+            <?php endforeach; ?>
+        </div>
+        <?php endif; ?>
+    </div>
+</section>
+
+<!-- ==========================================
      SECTION NOUVEAUTÉS
      ========================================== -->
 <section class="home-section bg-cream">
@@ -1365,7 +1617,7 @@ document.addEventListener('DOMContentLoaded', function() {
             fetch('ajouter_au_panier.php', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: 'product_id=' + encodeURIComponent(productId) + '&quantity=1'
+                body  : 'product_id=' + encodeURIComponent(productId) + '&quantity=1'
             })
             .then(r => r.json())
             .then(data => {
@@ -1460,6 +1712,8 @@ document.addEventListener('DOMContentLoaded', function() {
 
 });
 </script>
+
+<script src="<?php echo htmlspecialchars(SITE_URL); ?>assets/js/quiz-premium.js" defer></script>
 
 <?php
 // Inclut footer.php → ferme les balises </main>, </body>, </html>

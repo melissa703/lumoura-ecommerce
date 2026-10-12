@@ -617,7 +617,7 @@ document.addEventListener('DOMContentLoaded', function() {
             this.style.cursor = 'wait';
             
             // ✅ CORRIGÉ : URL changée vers add-to-cart.php et virgule bien placée
-            fetch('add-to-cart.php', {
+            fetch('ajouter_au_panier.php', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                 body: 'product_id=' + encodeURIComponent(productId)
@@ -630,16 +630,14 @@ document.addEventListener('DOMContentLoaded', function() {
                     this.style.background = 'linear-gradient(135deg, #10b981 0%, #059669 100%)';
                     
                     // Mettre à jour le compteur panier
-                    const cartCount = document.querySelector('.cart-count');
-                    if (cartCount) {
-                        cartCount.textContent = data.cart_count;
-                        
-                        // Animation du compteur
-                        cartCount.style.transform = 'scale(1.3)';
-                        setTimeout(() => {
-                            cartCount.style.transform = 'scale(1)';
-                        }, 300);
-                    }
+                    // Mettre à jour TOUS les compteurs panier
+                    document.querySelectorAll('.cart-count, #cartCount').forEach(el => {
+                        el.textContent = data.cart_count !== undefined ? data.cart_count : (parseInt(el.textContent || 0) + 1);
+                        el.style.display = 'inline-flex';
+                        el.style.transition = 'transform 0.3s ease';
+                        el.style.transform = 'scale(1.4)';
+                        setTimeout(() => { el.style.transform = 'scale(1)'; }, 300);
+                    });
                     
                     // Retour à l'état normal après 2.5 secondes
                     setTimeout(() => {

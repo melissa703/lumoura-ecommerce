@@ -69,6 +69,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['verifier_otp'])) {
             $_SESSION['prenom']  = $pending['prenom'];
             $_SESSION['role']    = 'client';
 
+            // ✅ Envoi de l'email de bienvenue après inscription réussie
+            require_once '../includes/envoyer-email.php';
+            envoyerEmailBienvenue(
+                $pending['email'],
+                $pending['prenom'],
+                $pending['nom']
+            );
+
             // Nettoyage de la session OTP
             unset($_SESSION['otp_inscription_pending']);
 

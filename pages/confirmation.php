@@ -78,6 +78,33 @@ try {
     die('Erreur lors du chargement de la commande.');
 }
 
+// ============================================================
+// ENVOI EMAIL DE CONFIRMATION DE COMMANDE (une seule fois)
+// ============================================================
+// On utilise un flag en session pour éviter de renvoyer
+// l'email si l'utilisateur recharge la page.
+// Le flag 'email_commande_envoyé_{order_id}' est créé ici
+// puis supprimé après envoi.
+// ============================================================
+if (!isset($_SESSION['email_commande_envoye_' . $order_id])) {
+    require_once '../includes/envoyer-email.php';
+
+    $email_envoye = envoyerEmailConfirmationCommande(
+        $order['email'],
+        $order['prenom'],
+        $order,
+        $order_items,
+        $order_id
+    );
+
+    // Marquer comme envoyé en session (évite le doublon si l'utilisateur recharge)
+    $_SESSION['email_commande_envoye_' . $order_id] = true;
+
+    if (!$email_envoye) {
+        error_log("⚠️ Échec envoi email confirmation commande #$order_id à " . $order['email']);
+    }
+}
+
 // Titre de page dynamique avec le numéro de commande
 $pageTitle = "Confirmation de commande #$order_id - Lumoura";
 include '../includes/header.php';

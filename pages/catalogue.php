@@ -50,10 +50,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 // Le stock disponible est insuffisant pour la quantité demandée
                 $_SESSION['cart_message'] = 'Stock insuffisant.';
             } else {
-                // ÉTAPE 2 : Vérifier si ce produit est déjà dans le panier de cet utilisateur
-                $checkQuery = "SELECT * FROM panier WHERE id_utilisateur = ? AND id_produit = ?";
+                // ÉTAPE 2 : Choisir le FORMAT à ajouter : le moins cher (celui affiché "Dès X €")
+                $formatStmt = $pdo->prepare("SELECT id_format FROM produit_formats WHERE id_produit = ? ORDER BY prix ASC LIMIT 1");
+                $formatStmt->execute([$product_id]);
+                $format_id = (int) $formatStmt->fetchColumn();
+
+                // Vérifier si ce produit, dans ce format, est déjà dans le panier de cet utilisateur
+                $checkQuery = "SELECT * FROM panier WHERE id_utilisateur = ? AND id_produit = ? AND id_format = ?";
                 $checkStmt  = $pdo->prepare($checkQuery);
-                $checkStmt->execute([$user_id, $product_id]);
+                $checkStmt->execute([$user_id, $product_id, $format_id]);
                 $existingItem = $checkStmt->fetch();
                 
                 if ($existingItem) {
@@ -64,9 +69,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                     $updateStmt->execute([$newQuantity, $existingItem['id_panier']]);
                 } else {
                     // CAS B : Nouveau produit dans le panier → on INSERT une nouvelle ligne
-                    $insertQuery = "INSERT INTO panier (id_utilisateur, id_produit, quantite) VALUES (?, ?, ?)";
+                    $insertQuery = "INSERT INTO panier (id_utilisateur, id_produit, id_format, quantite) VALUES (?, ?, ?, ?)";
                     $insertStmt  = $pdo->prepare($insertQuery);
-                    $insertStmt->execute([$user_id, $product_id, $quantity]);
+                    $insertStmt->execute([$user_id, $product_id, $format_id, $quantity]);
                 }
                 
                 $_SESSION['cart_message'] = 'Le produit a été ajouté à votre panier.';
@@ -169,13 +174,13 @@ if ($marque) {
 
 // Filtre par prix maximum
 if ($max_price > 1) {
-    $where[]           = "p.prix <= :max_price";
+    $where[]           = "COALESCE(f.prix_min, p.prix) <= :max_price";
     $params[':max_price'] = $max_price;
 }
 
 // Filtre par prix minimum
 if ($min_price > 0) {
-    $where[]           = "p.prix >= :min_price";
+    $where[]           = "COALESCE(f.prix_min, p.prix) >= :min_price";
     $params[':min_price'] = $min_price;
 }
 
@@ -191,7 +196,19 @@ $whereClause = !empty($where) ? 'WHERE ' . implode(' AND ', $where) : '';
 
 // --- REQUÊTE 1 : Compter le nombre total de produits correspondants ---
 // Indispensable pour calculer le nombre de pages (pagination)
-$countQuery    = "SELECT COUNT(*) FROM produits p $whereClause";
+// --- JOINTURE SUR LES FORMATS (30 / 50 / 100 ml) ---
+// Pour chaque produit : prix_min = prix du format le moins cher (affiché "Dès X €")
+//                       formats  = liste des contenances (ex : "30 / 50 / 100")
+$formatsJoin = "LEFT JOIN (
+        SELECT id_produit,
+               MIN(prix) AS prix_min,
+               GROUP_CONCAT(volume_ml ORDER BY volume_ml SEPARATOR ' / ') AS formats,
+               COUNT(*) AS nb_formats
+        FROM produit_formats
+        GROUP BY id_produit
+    ) f ON f.id_produit = p.id_produit";
+
+$countQuery    = "SELECT COUNT(*) FROM produits p $formatsJoin $whereClause";
 $countStmt     = $pdo->prepare($countQuery);
 $countStmt->execute($params);
 $total_products = (int) $countStmt->fetchColumn(); // fetchColumn() retourne la valeur de la 1ère colonne
@@ -202,11 +219,11 @@ $total_pages    = ceil($total_products / $limit);  // ceil() arrondit au supéri
 // La valeur de $sort détermine l'ORDER BY de la requête
 // Si $sort ne correspond à rien → valeur par défaut : plus récents en premier
 $orderBy = match($sort) {
-    'price_asc'  => 'p.prix ASC',                              // Prix du moins cher au plus cher
-    'price_desc' => 'p.prix DESC',                             // Prix du plus cher au moins cher
+    'price_asc'  => 'COALESCE(f.prix_min, p.prix) ASC',                              // Prix du moins cher au plus cher
+    'price_desc' => 'COALESCE(f.prix_min, p.prix) DESC',                             // Prix du plus cher au moins cher
     'name_asc'   => 'p.nom ASC',                               // Alphabétique A → Z
     'name_desc'  => 'p.nom DESC',                              // Alphabétique Z → A
-    'popular'    => '(p.bestseller + p.nouveaute) DESC, p.prix ASC', // Best-sellers et nouveautés d'abord
+    'popular'    => '(p.bestseller + p.nouveaute) DESC, COALESCE(f.prix_min, p.prix) ASC', // Best-sellers et nouveautés d'abord
     default      => 'p.date_ajout DESC',                       // Défaut : les plus récents
 };
 
@@ -218,9 +235,10 @@ $orderBy = match($sort) {
 //   → LIMIT 12 : prend maximum 12 produits
 //   → OFFSET 24 : saute les 24 premiers (pour la page 3)
 $query = "
-    SELECT p.*, c.nom_categorie 
+    SELECT p.*, c.nom_categorie, f.prix_min, f.formats, f.nb_formats 
     FROM produits p 
     LEFT JOIN categories c ON p.id_categorie = c.id_categorie 
+    $formatsJoin 
     $whereClause 
     ORDER BY $orderBy
     LIMIT :limit OFFSET :offset
@@ -265,9 +283,9 @@ $all_marques   = $marquesStmt->fetchAll(PDO::FETCH_COLUMN); // Récupère unique
 // Le titre change selon les filtres actifs pour le SEO et l'UX
 $pageTitle = "Notre Collection de Parfums";
 if ($category) $pageTitle .= " – " . htmlspecialchars($category);         // ex: "... – Femme"
-if ($filter === 'Neauveautés') $pageTitle .= " -  Nouveautés";            // Note: faute de frappe dans le code original
-if ($filter === 'Best-sellers') $pageTitle .= "- Best-sellers";
-if ($filter === 'Promotions') $pageTitle .= "-Promotions";
+if ($filter === 'new') $pageTitle .= " – Nouveautés";
+if ($filter === 'bestseller') $pageTitle .= " – Best-sellers";
+if ($filter === 'promo') $pageTitle .= " – Promotions";
 if ($search) $pageTitle .= " – Recherche : " . htmlspecialchars($search); // ex: "... – Recherche : Chanel"
 
 // Inclusion du header HTML commun à toutes les pages (navbar, balises <head>, etc.)
@@ -277,10 +295,10 @@ include '../includes/header.php';
 <div class="container" style="max-width: 1400px; margin: 0 auto; padding: 30px 20px;">
     <!-- En-tête -->
     <div class="catalogue-header" style="text-align: center; margin-bottom: 50px;">
-        <h1 class="page-title" style="font-size: 2.8em; margin-bottom: 15px; color: #3a2c1f; font-weight: 300;">
+        <h1 class="page-title" style="font-size: 2.8em; margin-bottom: 15px; font-weight: 300;">
             Collection de Parfums d'Exception
         </h1>
-        <p class="page-subtitle" style="font-size: 1.2em; color: #666; max-width: 800px; margin: 0 auto 30px;">
+        <p class="page-subtitle" style="font-size: 1.2em; max-width: 800px; margin: 0 auto 30px;">
             Découvrez des fragrances uniques, soigneusement sélectionnées pour éveiller vos sens
         </p>
     </div>
@@ -307,7 +325,7 @@ include '../includes/header.php';
 
     <!-- ===== BANDEAU STATISTIQUES ===== -->
     <!-- Affiche des informations rassurantes pour l'utilisateur (nb produits, livraison, etc.) -->
-    <!-- number_format($total_products, 1, ',', ' ') : formate le nombre avec 1 décimale, virgule, espace pour les milliers -->
+    <!-- number_format($total_products, 0, ',', ' ') : formate le nombre sans décimale, avec espace pour les milliers -->
     <div class="catalogue-stats" style="
         display: flex;
         justify-content: center;
@@ -320,7 +338,7 @@ include '../includes/header.php';
     ">
         <div class="stat-item" style="display: flex; align-items: center; gap: 12px; font-size: 1.1em;">
             <i class="fas fa-flask" style="color: #d4a017; font-size: 1.4em;"></i>
-            <span><strong><?php echo number_format($total_products, 1, ',', ' '); ?></strong> parfums</span>
+            <span><strong><?php echo number_format($total_products, 0, ',', ' '); ?></strong> parfums</span>
         </div>
         <div class="stat-item" style="display: flex; align-items: center; gap: 12px; font-size: 1.1em;">
             <i class="fas fa-truck" style="color: #d4a017; font-size: 1.4em;"></i>
@@ -407,7 +425,7 @@ include '../includes/header.php';
             <div class="filter-section" style="margin-bottom: 25px;">
                 <h4 style="font-size: 1.1em; margin-bottom: 12px; color: #555;">Genre</h4>
                 <div style="display: flex; flex-direction: column; gap: 8px;">
-                    <a href="?page=1" class="filter-link <?php echo !$category ? 'active' : ''; ?>" 
+                    <a href="catalogue.php" class="filter-link <?php echo !$category ? 'active' : ''; ?>" 
                        style="
                            display: flex;
                            align-items: center;
@@ -422,7 +440,7 @@ include '../includes/header.php';
                         Tous les parfums
                     </a>
                     <?php foreach (['Femme', 'Homme', 'Unisexe'] as $cat): ?>
-                        <a href="?category=<?php echo urlencode($cat); ?>&page=1" 
+                        <a href="?category=<?php echo urlencode($cat); ?>&sort=<?php echo urlencode($sort); ?>&page=1" 
                            class="filter-link <?php echo $category === $cat ? 'active' : ''; ?>"
                            style="
                                display: flex;
@@ -447,7 +465,7 @@ include '../includes/header.php';
             <div class="filter-section" style="margin-bottom: 25px;">
                 <h4 style="font-size: 1.1em; margin-bottom: 12px; color: #555;">Sélections</h4>
                 <div style="display: flex; flex-direction: column; gap: 8px;">
-                    <a href="?filter=new&page=1" 
+                    <a href="?filter=new&sort=<?php echo urlencode($sort); ?>&page=1" 
                        class="<?php echo $filter === 'new' ? 'active' : ''; ?>"
                        style="
                            display: flex;
@@ -462,7 +480,7 @@ include '../includes/header.php';
                         <i class="fas fa-star" style="margin-right: 10px; color: #d4a017;"></i>
                         Nouveautés
                     </a>
-                    <a href="?filter=bestseller&page=1" 
+                    <a href="?filter=bestseller&sort=<?php echo urlencode($sort); ?>&page=1" 
                        class="<?php echo $filter === 'bestseller' ? 'active' : ''; ?>"
                        style="
                            display: flex;
@@ -477,7 +495,7 @@ include '../includes/header.php';
                         <i class="fas fa-fire" style="margin-right: 10px; color: #d4a017;"></i>
                         Best-sellers
                     </a>
-                    <a href="?filter=promo&page=1" 
+                    <a href="?filter=promo&sort=<?php echo urlencode($sort); ?>&page=1" 
                        class="<?php echo $filter === 'promo' ? 'active' : ''; ?>"
                        style="
                            display: flex;
@@ -671,7 +689,9 @@ include '../includes/header.php';
                 ">
                     <?php foreach ($products as $product): 
                         // --- Calcul du prix avec réduction ---
-                        $price       = (float)$product['prix'];
+                        // Prix affiché = format le moins cher (table produit_formats), sinon prix du produit
+                        $price       = (float)($product['prix_min'] ?? $product['prix']);
+                        $has_formats = (int)($product['nb_formats'] ?? 0) > 1; // plusieurs formats → "Dès X €"
                         $discount    = (float)$product['promotion_pourcentage']; // % de réduction
                         // Si réduction > 0% : prix final = prix - réduction, sinon = prix normal
                         $final_price = $discount > 0 ? $price * (1 - $discount / 100) : $price;
@@ -757,7 +777,6 @@ include '../includes/header.php';
                                 <?php if ($product['stock'] == 0): ?>
                                     <!-- Badge "Rupture de stock" : affiché si stock = 0 en BDD -->
                                     <span class="badge out-of-stock" style="
-                                    <span class="badge out-of-stock" style="
                                         background: linear-gradient(135deg, #e74c3c, #c0392b);
                                         color: white;
                                         padding: 6px 12px;
@@ -821,18 +840,48 @@ include '../includes/header.php';
                                     
                                     <div style="font-size: 0.9em; color: #666; margin-bottom: 15px; display: flex; align-items: center;">
                                         <i class="fas fa-wine-bottle" style="margin-right: 6px; color: #d4a017;"></i>
-                                        <span><?php echo $product['volume_ml']; ?> ml</span>
+                                        <span><?php echo htmlspecialchars($product['formats'] ?? $product['volume_ml']); ?> ml</span>
                                         <span style="margin: 0 8px;">•</span>
                                         <i class="fas fa-venus-mars" style="margin-right: 6px; color: #d4a017;"></i>
                                         <span><?php echo htmlspecialchars($product['genre']); ?></span>
                                     </div>
                                 </div>
 
+                                <!-- ===== NOTES OLFACTIVES ===== -->
+                                <?php if (!empty($product['famille_olfactive'])): ?>
+                                <div style="margin-bottom: 12px;">
+                                    <span style="
+                                        display: inline-flex;
+                                        align-items: center;
+                                        gap: 5px;
+                                        background: #f8f5f0;
+                                        border: 1px solid #e8d8b0;
+                                        color: #7a5a00;
+                                        font-size: 0.8em;
+                                        font-weight: 600;
+                                        padding: 4px 10px;
+                                        border-radius: 20px;
+                                    ">
+                                        <i class="fas fa-leaf" style="color: #d4a017; font-size: 0.85em;"></i>
+                                        <?php echo htmlspecialchars($product['famille_olfactive']); ?>
+                                    </span>
+                                    <?php if (!empty($product['notes_tete'])): ?>
+                                    <div style="margin-top: 6px; font-size: 0.78em; color: #999; font-style: italic;">
+                                        <i class="fas fa-wind" style="margin-right: 4px; color: #d4a017;"></i>
+                                        <?php echo htmlspecialchars(mb_substr($product['notes_tete'], 0, 40)) . (mb_strlen($product['notes_tete']) > 40 ? '...' : ''); ?>
+                                    </div>
+                                    <?php endif; ?>
+                                </div>
+                                <?php endif; ?>
+
                                 <!-- ===== AFFICHAGE DU PRIX ===== -->
                                 <!-- Si réduction > 0 : prix original barré + prix réduit en rouge -->
                                 <!-- Sinon : prix normal en gris foncé -->
                                 <!-- formatPrice() est une fonction de functions.php qui formate le prix (ex: 89,90 €) -->
                                 <div style="margin-bottom: 20px;">
+                                    <?php if ($has_formats): ?>
+                                        <div style="font-size: 0.8em; color: #888; text-transform: uppercase; letter-spacing: 1px;">Dès</div>
+                                    <?php endif; ?>
                                     <?php if ($discount > 0): ?>
                                         <div style="display: flex; align-items: center; gap: 10px;">
                                             <span style="color: #888; text-decoration: line-through; font-size: 0.95em;">
@@ -859,7 +908,7 @@ include '../includes/header.php';
                                     <?php if ($product['stock'] > 0): ?>
                                         <div style="font-size: 0.85em; color: #27ae60; margin-top: 5px;">
                                             <i class="fas fa-check-circle"></i>
-                                            <?php echo $product['stock'] > 10 ? 'En stock' : 'Stock limité'; ?>
+                                            <?php echo $product['stock'] > 10 ? 'En stock' : '<strong>Plus que ' . $product['stock'] . ' en stock !</strong>'; ?>
                                         </div>
                                     <?php else: ?>
                                         <div style="font-size: 0.85em; color: #e74c3c; margin-top: 5px;">
@@ -998,6 +1047,106 @@ include '../includes/header.php';
                         </a>
                     </div>
                 </div>
+            <?php endif; ?>
+
+            <?php if ($total_pages > 1): ?>
+            <!-- ===== PAGINATION ===== -->
+            <div style="
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                gap: 8px;
+                margin-top: 50px;
+                flex-wrap: wrap;
+            ">
+                <?php
+                // Reconstruction de l'URL en conservant tous les filtres actifs
+                $paginationParams = $_GET;
+                unset($paginationParams['page']);
+                $paginationBase = '?' . ($paginationParams ? http_build_query($paginationParams) . '&' : '');
+                ?>
+
+                <!-- Bouton Précédent -->
+                <?php if ($page > 1): ?>
+                <a href="<?php echo $paginationBase; ?>page=<?php echo $page - 1; ?>" style="
+                    display: flex; align-items: center; gap: 6px;
+                    padding: 10px 18px;
+                    background: white;
+                    border: 2px solid #e0d5c5;
+                    border-radius: 10px;
+                    color: #3a2c1f;
+                    text-decoration: none;
+                    font-weight: 600;
+                    font-size: 0.95em;
+                    transition: all 0.2s;
+                " onmouseover="this.style.borderColor='#d4a017';this.style.color='#d4a017'"
+                   onmouseout="this.style.borderColor='#e0d5c5';this.style.color='#3a2c1f'">
+                    <i class="fas fa-chevron-left"></i> Précédent
+                </a>
+                <?php endif; ?>
+
+                <!-- Numéros de pages -->
+                <?php for ($i = 1; $i <= $total_pages; $i++): ?>
+                    <?php
+                    // Afficher : page 1, page courante ±2, dernière page
+                    // Sinon afficher "..."
+                    $showPage = ($i == 1 || $i == $total_pages || abs($i - $page) <= 2);
+                    $showDots  = (!$showPage && ($i == 2 || $i == $total_pages - 1));
+                    if ($showDots): ?>
+                        <span style="padding: 10px 6px; color: #aaa; font-size: 1.1em;">…</span>
+                    <?php elseif ($showPage): ?>
+                        <a href="<?php echo $paginationBase; ?>page=<?php echo $i; ?>" style="
+                            display: flex; align-items: center; justify-content: center;
+                            width: 42px; height: 42px;
+                            border-radius: 10px;
+                            font-weight: <?php echo $i == $page ? '700' : '500'; ?>;
+                            font-size: 0.95em;
+                            text-decoration: none;
+                            transition: all 0.2s;
+                            background: <?php echo $i == $page ? 'linear-gradient(135deg, #d4a017, #c29b15)' : 'white'; ?>;
+                            color: <?php echo $i == $page ? 'white' : '#3a2c1f'; ?>;
+                            border: 2px solid <?php echo $i == $page ? '#d4a017' : '#e0d5c5'; ?>;
+                            box-shadow: <?php echo $i == $page ? '0 4px 12px rgba(212,160,23,0.35)' : 'none'; ?>;
+                        " <?php if ($i != $page): ?>
+                            onmouseover="this.style.borderColor='#d4a017';this.style.color='#d4a017'"
+                            onmouseout="this.style.borderColor='#e0d5c5';this.style.color='#3a2c1f'"
+                          <?php endif; ?>>
+                            <?php echo $i; ?>
+                        </a>
+                    <?php endif; ?>
+                <?php endfor; ?>
+
+                <!-- Bouton Suivant -->
+                <?php if ($page < $total_pages): ?>
+                <a href="<?php echo $paginationBase; ?>page=<?php echo $page + 1; ?>" style="
+                    display: flex; align-items: center; gap: 6px;
+                    padding: 10px 18px;
+                    background: white;
+                    border: 2px solid #e0d5c5;
+                    border-radius: 10px;
+                    color: #3a2c1f;
+                    text-decoration: none;
+                    font-weight: 600;
+                    font-size: 0.95em;
+                    transition: all 0.2s;
+                " onmouseover="this.style.borderColor='#d4a017';this.style.color='#d4a017'"
+                   onmouseout="this.style.borderColor='#e0d5c5';this.style.color='#3a2c1f'">
+                    Suivant <i class="fas fa-chevron-right"></i>
+                </a>
+                <?php endif; ?>
+
+                <!-- Infos résumé -->
+                <div style="
+                    width: 100%;
+                    text-align: center;
+                    margin-top: 12px;
+                    font-size: 0.88em;
+                    color: #aaa;
+                ">
+                    Page <?php echo $page; ?> sur <?php echo $total_pages; ?>
+                    · <?php echo $total_products; ?> parfum<?php echo $total_products > 1 ? 's' : ''; ?> au total
+                </div>
+            </div>
             <?php endif; ?>
         </main>
     </div>
