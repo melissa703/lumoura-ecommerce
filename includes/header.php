@@ -183,7 +183,7 @@ if (isset($_SESSION['user_id'])) {
                                 <i class="fas fa-shopping-bag"></i> Mes Commandes
                             </a>
                             <?php if (!empty($_SESSION['is_admin'])): ?>
-                                <a href="<?php echo SITE_URL; ?>pages/admin/">
+                                <a href="<?php echo SITE_URL; ?>pages/admin/dashboard.php">
                                     <i class="fas fa-cog"></i> Administration
                                 </a>
                             <?php endif; ?>

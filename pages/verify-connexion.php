@@ -59,7 +59,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['verifier_otp'])) {
 
         // Redirection selon le rôle
         if ($pending['role'] === 'admin') {
-            header('Location: ' . SITE_URL . 'pages/admin/admin.php');
+            header('Location: ' . SITE_URL . 'pages/admin/dashboard.php');
         } else {
             header('Location: ' . SITE_URL . 'pages/index.php');
         }

@@ -1,4 +1,5 @@
 <?php
+require_once __DIR__ . '/config.php';
 // Connexion à la base de données
 
 try {

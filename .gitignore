@@ -1,1 +1,26 @@
+﻿# Configuration et secrets
 .env
+.env.*
+!.env.example
+
+# Dépendances locales
+/vendor/
+
+# Fichiers temporaires et sauvegardes
+*.bak
+*.tmp
+*.old
+*.log
+*~
+
+# Fichiers système
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+
+# Fichiers locaux
+*.cache

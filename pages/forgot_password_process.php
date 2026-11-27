@@ -2,7 +2,7 @@
 use PHPMailer\PHPMailer\PHPMailer;
 use PHPMailer\PHPMailer\Exception;
 
-require_once '../vendor/autoload.php';
+require_once '../includes/envoyer-email.php';
 require_once '../includes/db.php';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -24,20 +24,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $stmt->execute([$token, $expires, $email]);
 
     $prenom    = htmlspecialchars($user['prenom']);
-    $resetLink = "http://localhost/lumoura/pages/reset_password.php?token=" . $token;
+  $resetLink = rtrim(SITE_URL, '/') . '/pages/reset_password.php?token=' . urlencode($token);
 
     $mail = new PHPMailer(true);
     try {
         $mail->isSMTP();
-        $mail->Host       = 'smtp.gmail.com';
-        $mail->SMTPAuth   = true;
-        $mail->Username   = 'sissaminuilla@gmail.com';
-        $mail->Password   = 'fupt qntg duti eqpz';
-        $mail->SMTPSecure = PHPMailer::ENCRYPTION_STARTTLS;
-        $mail->Port       = 587;
-        $mail->CharSet    = 'UTF-8';
+$mail->Host       = 'smtp.gmail.com';
+$mail->SMTPAuth   = true;
+$mail->Username   = GMAIL_USER;
+$mail->Password   = GMAIL_APP_PASSWORD;
+$mail->SMTPSecure = PHPMailer::ENCRYPTION_STARTTLS;
+$mail->Port       = 587;
+$mail->CharSet    = 'UTF-8';
 
-        $mail->setFrom('sissaminuilla@gmail.com', 'Lumoura Parfums');
+$mail->setFrom(GMAIL_USER, MAIL_FROM_NAME);
         $mail->addAddress($email, $prenom);
         $mail->isHTML(true);
         $mail->Subject = 'Réinitialisation de votre mot de passe – Lumoura';

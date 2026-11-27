@@ -1,729 +1,133 @@
 <?php
-// ============================================================
-// FICHIER : pages/livreurs.php
-// RÔLE    : CRUD complet pour la gestion des livreurs
-//           + assignation d'un livreur à une commande
-// ============================================================
-
+/**
+ * LUMOURA - Gestion des livreurs et affectations de commandes.
+ * Même structure visuelle que le back-office principal.
+ */
 require_once '../includes/config.php';
 require_once '../includes/db.php';
 require_once '../includes/functions.php';
 
-// Vérification : admin uniquement (même logique que admin.php)
-if (!isset($_SESSION['user_id'])) {
-    header("Location: " . SITE_URL . "pages/connexion.php");
-    exit();
+if (!function_exists('lm_escape')) {
+    function lm_escape($value): string { return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8'); }
 }
-
-// Vérifier le rôle admin en BDD
-$check_stmt = $pdo->prepare("SELECT role FROM utilisateurs WHERE id_utilisateur = ?");
-$check_stmt->execute([$_SESSION['user_id']]);
-$check_user = $check_stmt->fetch();
-
-if (!$check_user || $check_user['role'] !== 'admin') {
-    header("Location: " . SITE_URL . "pages/index.php");
-    exit();
-}
-
-$success_msg = '';
-$error_msg   = '';
-
-// ============================================================
-// TRAITEMENT DES ACTIONS POST
-// ============================================================
-
-// --- AJOUTER un livreur ---
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_ajouter'])) {
-    $nom            = trim($_POST['nom']            ?? '');
-    $prenom         = trim($_POST['prenom']         ?? '');
-    $telephone      = trim($_POST['telephone']      ?? '');
-    $zone_livraison = trim($_POST['zone_livraison'] ?? '');
-    $vehicule       = trim($_POST['vehicule']       ?? '');
-    $statut         = $_POST['statut'] === 'inactif' ? 'inactif' : 'actif';
-    $prix_livraison = (float) str_replace(',', '.', $_POST['prix_livraison'] ?? 5.90);
-
-    if ($nom && $prenom && $telephone && $zone_livraison && $vehicule) {
-        $stmt = $pdo->prepare("
-            INSERT INTO livreurs (nom, prenom, telephone, zone_livraison, vehicule, prix_livraison, statut)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ");
-        $stmt->execute([$nom, $prenom, $telephone, $zone_livraison, $vehicule, $prix_livraison, $statut]);
-        $success_msg = "Livreur $prenom $nom ajouté avec succès !";
-    } else {
-        $error_msg = "Tous les champs sont obligatoires.";
+if (!function_exists('lm_status_label')) {
+    function lm_status_label(?string $status): string {
+        return match ($status) {
+            'en attente', 'en_attente' => 'En attente',
+            'payee', 'payée' => 'Payée',
+            'expediee', 'expédiée' => 'Expédiée',
+            'livree', 'livrée' => 'Livrée',
+            'annulee', 'annulée' => 'Annulée',
+            default => ucfirst((string) $status),
+        };
     }
 }
 
-// --- MODIFIER un livreur ---
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_modifier'])) {
-    $id             = (int) $_POST['id_livreur'];
-    $nom            = trim($_POST['nom']            ?? '');
-    $prenom         = trim($_POST['prenom']         ?? '');
-    $telephone      = trim($_POST['telephone']      ?? '');
-    $zone_livraison = trim($_POST['zone_livraison'] ?? '');
-    $vehicule       = trim($_POST['vehicule']       ?? '');
-    $statut         = $_POST['statut'] === 'inactif' ? 'inactif' : 'actif';
-    $prix_livraison = (float) str_replace(',', '.', $_POST['prix_livraison'] ?? 5.90);
+if (!isLoggedIn()) {
+    header('Location: ' . SITE_URL . 'pages/connexion.php');
+    exit();
+}
+$userStmt = $pdo->prepare('SELECT * FROM utilisateurs WHERE id_utilisateur = ?');
+$userStmt->execute([(int) ($_SESSION['user_id'] ?? 0)]);
+$admin = $userStmt->fetch(PDO::FETCH_ASSOC);
+if (!$admin || ($admin['role'] ?? '') !== 'admin') {
+    header('Location: ' . SITE_URL . 'pages/index.php');
+    exit();
+}
 
-    if ($id && $nom && $prenom && $telephone && $zone_livraison && $vehicule) {
-        $stmt = $pdo->prepare("
-            UPDATE livreurs
-            SET nom=?, prenom=?, telephone=?, zone_livraison=?, vehicule=?, prix_livraison=?, statut=?
-            WHERE id_livreur=?
-        ");
-        $stmt->execute([$nom, $prenom, $telephone, $zone_livraison, $vehicule, $prix_livraison, $statut, $id]);
-        $success_msg = "Livreur mis à jour avec succès !";
-    } else {
-        $error_msg = "Tous les champs sont obligatoires.";
+$successMessage = '';
+$errorMessage = '';
+$section = ($_GET['section'] ?? 'livreurs') === 'commandes' ? 'commandes' : 'livreurs';
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    try {
+        if (isset($_POST['action_ajouter']) || isset($_POST['action_modifier'])) {
+            $isEdit = isset($_POST['action_modifier']);
+            $id = (int) ($_POST['id_livreur'] ?? 0);
+            $nom = trim($_POST['nom'] ?? '');
+            $prenom = trim($_POST['prenom'] ?? '');
+            $telephone = trim($_POST['telephone'] ?? '');
+            $zone = trim($_POST['zone_livraison'] ?? '');
+            $vehicule = trim($_POST['vehicule'] ?? 'Scooter');
+            $statut = ($_POST['statut'] ?? 'actif') === 'inactif' ? 'inactif' : 'actif';
+            $prix = (float) str_replace(',', '.', $_POST['prix_livraison'] ?? 5.90);
+            if ($nom === '' || $prenom === '' || $telephone === '' || $zone === '' || $vehicule === '') throw new RuntimeException('Tous les champs du livreur sont obligatoires.');
+            if ($isEdit && $id <= 0) throw new RuntimeException('Livreur introuvable.');
+            if ($isEdit) {
+                $stmt = $pdo->prepare('UPDATE livreurs SET nom=?, prenom=?, telephone=?, zone_livraison=?, vehicule=?, prix_livraison=?, statut=? WHERE id_livreur=?');
+                $stmt->execute([$nom, $prenom, $telephone, $zone, $vehicule, $prix, $statut, $id]);
+                $successMessage = 'Le profil du livreur a été mis à jour.';
+            } else {
+                $stmt = $pdo->prepare('INSERT INTO livreurs (nom, prenom, telephone, zone_livraison, vehicule, prix_livraison, statut) VALUES (?, ?, ?, ?, ?, ?, ?)');
+                $stmt->execute([$nom, $prenom, $telephone, $zone, $vehicule, $prix, $statut]);
+                $successMessage = 'Le livreur a été ajouté avec succès.';
+            }
+            $section = 'livreurs';
+        }
+        if (isset($_POST['action_supprimer'])) {
+            $id = (int) ($_POST['id_livreur_suppr'] ?? 0);
+            if ($id <= 0) throw new RuntimeException('Livreur introuvable.');
+            $pdo->prepare('UPDATE commandes SET id_livreur = NULL WHERE id_livreur = ?')->execute([$id]);
+            $pdo->prepare('DELETE FROM livreurs WHERE id_livreur = ?')->execute([$id]);
+            $successMessage = 'Le livreur a été supprimé et ses commandes désassignées.';
+            $section = 'livreurs';
+        }
+        if (isset($_POST['action_assigner'])) {
+            $orderId = (int) ($_POST['id_commande'] ?? 0);
+            $driverId = ($_POST['id_livreur'] ?? '') === '' ? null : (int) $_POST['id_livreur'];
+            if ($orderId <= 0) throw new RuntimeException('Commande introuvable.');
+            $pdo->prepare('UPDATE commandes SET id_livreur = ? WHERE id_commande = ?')->execute([$driverId, $orderId]);
+            $successMessage = $driverId === null ? 'Le livreur a été désassigné.' : 'Le livreur a été affecté à la commande.';
+            $section = 'commandes';
+        }
+    } catch (Throwable $e) {
+        $errorMessage = $e instanceof RuntimeException ? $e->getMessage() : 'Une erreur est survenue. Vérifiez les données puis réessayez.';
     }
 }
 
-// --- SUPPRIMER un livreur ---
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_supprimer'])) {
-    $id = (int) $_POST['id_livreur_suppr'];
-    // On retire d'abord le livreur des commandes pour respecter la contrainte FK
-    $pdo->prepare("UPDATE commandes SET id_livreur = NULL WHERE id_livreur = ?")->execute([$id]);
-    $pdo->prepare("DELETE FROM livreurs WHERE id_livreur = ?")->execute([$id]);
-    $success_msg = "Livreur supprimé.";
-}
-
-// --- ASSIGNER un livreur à une commande ---
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_assigner'])) {
-    $id_commande = (int) $_POST['id_commande'];
-    $id_livreur  = ($_POST['id_livreur'] === '') ? null : (int) $_POST['id_livreur'];
-
-    $stmt = $pdo->prepare("UPDATE commandes SET id_livreur = ? WHERE id_commande = ?");
-    $stmt->execute([$id_livreur, $id_commande]);
-    $success_msg = "Livreur assigné à la commande avec succès !";
-}
-
-// ============================================================
-// RÉCUPÉRATION DES DONNÉES
-// ============================================================
-
-// Tous les livreurs
-$livreurs = $pdo->query("SELECT * FROM livreurs ORDER BY statut ASC, nom ASC")->fetchAll(PDO::FETCH_ASSOC);
-
-// Toutes les commandes avec le livreur assigné (si existant)
-$commandes = $pdo->query("
-    SELECT 
-        c.id_commande,
-        c.numero_commande,
-        c.statut,
-        c.montant,
-        c.date_commande,
-        c.id_livreur,
-        CONCAT(u.prenom, ' ', u.nom) AS client,
-        CONCAT(l.prenom, ' ', l.nom) AS livreur_nom
-    FROM commandes c
-    JOIN utilisateurs u ON u.id_utilisateur = c.id_utilisateur
-    LEFT JOIN livreurs l ON l.id_livreur = c.id_livreur
-    ORDER BY c.date_commande DESC
-    LIMIT 50
-")->fetchAll(PDO::FETCH_ASSOC);
-
-// Livreur à modifier (si ?edit=X dans l'URL)
-$edit_livreur = null;
+$drivers = $pdo->query('SELECT * FROM livreurs ORDER BY statut ASC, nom ASC')->fetchAll(PDO::FETCH_ASSOC);
+$orders = $pdo->query("SELECT c.id_commande, c.numero_commande, c.statut, c.montant, c.date_commande, c.id_livreur, CONCAT(u.prenom, ' ', u.nom) AS client, CONCAT(l.prenom, ' ', l.nom) AS livreur_nom FROM commandes c JOIN utilisateurs u ON u.id_utilisateur = c.id_utilisateur LEFT JOIN livreurs l ON l.id_livreur = c.id_livreur ORDER BY c.date_commande DESC LIMIT 100")->fetchAll(PDO::FETCH_ASSOC);
+$editDriver = null;
 if (isset($_GET['edit']) && is_numeric($_GET['edit'])) {
-    $stmt = $pdo->prepare("SELECT * FROM livreurs WHERE id_livreur = ?");
-    $stmt->execute([(int)$_GET['edit']]);
-    $edit_livreur = $stmt->fetch(PDO::FETCH_ASSOC);
+    $stmt = $pdo->prepare('SELECT * FROM livreurs WHERE id_livreur = ?');
+    $stmt->execute([(int) $_GET['edit']]);
+    $editDriver = $stmt->fetch(PDO::FETCH_ASSOC) ?: null;
 }
-
-// Statistiques
-$nb_actifs   = count(array_filter($livreurs, fn($l) => $l['statut'] === 'actif'));
-$nb_inactifs = count($livreurs) - $nb_actifs;
-$nb_assignees = count(array_filter($commandes, fn($c) => $c['id_livreur'] !== null));
-
-$pageTitle = "Gestion des Livreurs";
+$search = trim($_GET['q'] ?? '');
+if ($search !== '') {
+    $needle = mb_strtolower($search, 'UTF-8');
+    $drivers = array_values(array_filter($drivers, static fn($driver) => str_contains(mb_strtolower(($driver['prenom'] ?? '') . ' ' . ($driver['nom'] ?? '') . ' ' . ($driver['telephone'] ?? '') . ' ' . ($driver['zone_livraison'] ?? ''), 'UTF-8'), $needle)));
+    $orders = array_values(array_filter($orders, static fn($order) => str_contains(mb_strtolower(($order['numero_commande'] ?? '') . ' ' . ($order['client'] ?? '') . ' ' . ($order['livreur_nom'] ?? ''), 'UTF-8'), $needle)));
+}
+$activeDrivers = count(array_filter($drivers, static fn($driver) => ($driver['statut'] ?? '') === 'actif'));
+$assignedOrders = count(array_filter($orders, static fn($order) => $order['id_livreur'] !== null));
+$adminPath = '../pages/admin/admin.php';
+$shopPath = SITE_URL . 'pages/index.php';
+$displayName = trim(($admin['prenom'] ?? '') . ' ' . ($admin['nom'] ?? '')) ?: 'Administrateur';
+$initial = function_exists('mb_substr') ? mb_strtoupper(mb_substr($displayName, 0, 1, 'UTF-8'), 'UTF-8') : strtoupper(substr($displayName, 0, 1));
 ?>
-<!DOCTYPE html>
+<!doctype html>
 <html lang="fr">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Livreurs — Lumoura Admin</title>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Gestion des livreurs — Lumoura Admin</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
 <style>
-* { box-sizing: border-box; margin: 0; padding: 0; }
-
-body {
-    font-family: 'Segoe UI', sans-serif;
-    background: #1a1a1a;
-    color: #e0e0e0;
-    min-height: 100vh;
-}
-
-/* ---- TOPBAR ---- */
-.topbar {
-    background: #111;
-    padding: 18px 32px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    border-bottom: 2px solid #d4a017;
-    position: sticky;
-    top: 0;
-    z-index: 100;
-}
-.topbar-title { font-size: 1.3rem; font-weight: 700; color: #d4a017; }
-.topbar-title i { margin-right: 10px; }
-.btn-back {
-    background: #2a2a2a;
-    color: #d4a017;
-    border: 1px solid #d4a017;
-    border-radius: 8px;
-    padding: 8px 18px;
-    font-size: 0.9rem;
-    cursor: pointer;
-    text-decoration: none;
-    transition: all 0.2s;
-}
-.btn-back:hover { background: #d4a017; color: #111; }
-
-/* ---- WRAPPER ---- */
-.wrapper { max-width: 1300px; margin: 0 auto; padding: 32px 24px; }
-
-/* ---- STATS ---- */
-.stats-grid {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 18px;
-    margin-bottom: 32px;
-}
-.stat-card {
-    background: #232323;
-    border: 1px solid #333;
-    border-radius: 14px;
-    padding: 22px 28px;
-    text-align: center;
-    transition: border-color 0.2s;
-}
-.stat-card:hover { border-color: #d4a017; }
-.stat-icon { font-size: 1.8rem; margin-bottom: 8px; color: #d4a017; }
-.stat-value { font-size: 2rem; font-weight: 800; color: #fff; }
-.stat-label { font-size: 0.82rem; color: #888; margin-top: 4px; }
-
-/* ---- ALERTES ---- */
-.alert {
-    padding: 14px 20px;
-    border-radius: 10px;
-    margin-bottom: 24px;
-    font-size: 0.95rem;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-}
-.alert-success { background: #1a3a1a; border: 1px solid #2d6a2d; color: #6fcf6f; }
-.alert-error   { background: #3a1a1a; border: 1px solid #6a2d2d; color: #cf6f6f; }
-
-/* ---- SECTION TITRE ---- */
-.section-title {
-    font-size: 1.1rem;
-    font-weight: 700;
-    color: #d4a017;
-    margin-bottom: 18px;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-}
-
-/* ---- FORMULAIRE ---- */
-.form-card {
-    background: #232323;
-    border: 1px solid #333;
-    border-radius: 16px;
-    padding: 28px;
-    margin-bottom: 32px;
-}
-.form-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 16px;
-    margin-bottom: 20px;
-}
-.form-group label {
-    display: block;
-    font-size: 0.83rem;
-    color: #aaa;
-    margin-bottom: 6px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-}
-.form-group input,
-.form-group select {
-    width: 100%;
-    background: #1a1a1a;
-    border: 1px solid #444;
-    border-radius: 8px;
-    color: #e0e0e0;
-    padding: 10px 14px;
-    font-size: 0.95rem;
-    transition: border-color 0.2s;
-}
-.form-group input:focus,
-.form-group select:focus {
-    outline: none;
-    border-color: #d4a017;
-}
-.form-group select option { background: #1a1a1a; }
-
-/* ---- BOUTONS ---- */
-.btn {
-    padding: 10px 22px;
-    border-radius: 8px;
-    border: none;
-    font-size: 0.9rem;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.2s;
-    display: inline-flex;
-    align-items: center;
-    gap: 7px;
-    text-decoration: none;
-}
-.btn-gold  { background: linear-gradient(90deg, #d4a017, #e8b825); color: #111; }
-.btn-gold:hover  { background: linear-gradient(90deg, #b8880f, #d4a017); transform: translateY(-1px); }
-.btn-edit  { background: #2a3a5a; color: #6ab0f5; border: 1px solid #3a5a8a; font-size: 0.82rem; padding: 6px 14px; }
-.btn-edit:hover  { background: #3a5a8a; }
-.btn-delete{ background: #3a1a1a; color: #f57070; border: 1px solid #6a2d2d; font-size: 0.82rem; padding: 6px 14px; }
-.btn-delete:hover{ background: #6a2d2d; }
-.btn-cancel{ background: #2a2a2a; color: #aaa; border: 1px solid #444; }
-.btn-cancel:hover{ background: #333; }
-
-/* ---- TABLE ---- */
-.table-card {
-    background: #232323;
-    border: 1px solid #333;
-    border-radius: 16px;
-    overflow: hidden;
-    margin-bottom: 32px;
-}
-table { width: 100%; border-collapse: collapse; }
-thead tr { background: #1a1a1a; border-bottom: 2px solid #d4a017; }
-thead th { padding: 14px 16px; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.5px; color: #d4a017; text-align: left; }
-tbody tr { border-bottom: 1px solid #2a2a2a; transition: background 0.15s; }
-tbody tr:hover { background: #2a2a2a; }
-tbody td { padding: 13px 16px; font-size: 0.92rem; vertical-align: middle; }
-
-/* ---- BADGES ---- */
-.badge {
-    display: inline-block;
-    padding: 4px 12px;
-    border-radius: 20px;
-    font-size: 0.78rem;
-    font-weight: 600;
-    letter-spacing: 0.3px;
-}
-.badge-actif    { background: #1a3a1a; color: #6fcf6f; border: 1px solid #2d6a2d; }
-.badge-inactif  { background: #3a3a1a; color: #cfcf6f; border: 1px solid #6a6a2d; }
-.badge-attente  { background: #3a2a1a; color: #d4a017; border: 1px solid #6a4a1a; }
-.badge-livree   { background: #1a3a1a; color: #6fcf6f; border: 1px solid #2d6a2d; }
-.badge-expediee { background: #1a2a3a; color: #6fafcf; border: 1px solid #2d4a6a; }
-.badge-annulee  { background: #3a1a1a; color: #cf6f6f; border: 1px solid #6a2d2d; }
-.badge-aucun    { background: #2a2a2a; color: #666; border: 1px solid #444; }
-
-/* ---- VÉHICULE ICONE ---- */
-.vehicule-icon { font-size: 1.1rem; margin-right: 6px; }
-
-/* ---- SELECT ASSIGNER ---- */
-.select-assign {
-    background: #1a1a1a;
-    border: 1px solid #444;
-    border-radius: 6px;
-    color: #e0e0e0;
-    padding: 6px 10px;
-    font-size: 0.85rem;
-    cursor: pointer;
-}
-.select-assign:focus { outline: none; border-color: #d4a017; }
-
-/* ---- TABS ---- */
-.tabs {
-    display: flex;
-    gap: 4px;
-    margin-bottom: 28px;
-    background: #1a1a1a;
-    padding: 6px;
-    border-radius: 12px;
-    width: fit-content;
-}
-.tab-btn {
-    background: none;
-    border: none;
-    color: #888;
-    padding: 10px 22px;
-    border-radius: 8px;
-    cursor: pointer;
-    font-size: 0.9rem;
-    font-weight: 600;
-    transition: all 0.2s;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-.tab-btn.active, .tab-btn:hover {
-    background: #d4a017;
-    color: #111;
-}
-
-/* ---- EMPTY STATE ---- */
-.empty-state {
-    text-align: center;
-    padding: 48px 20px;
-    color: #555;
-}
-.empty-state i { font-size: 3rem; margin-bottom: 12px; display: block; }
-
-@media (max-width: 768px) {
-    .stats-grid { grid-template-columns: 1fr 1fr; }
-    .form-grid  { grid-template-columns: 1fr; }
-    table { font-size: 0.82rem; }
-    thead th, tbody td { padding: 10px 10px; }
-}
+:root{--cream:#fbf8f1;--cream-2:#f3ede1;--paper:#fffdfa;--ink:#2c1810;--text:#59483d;--muted:#86766b;--line:#e6dccb;--gold:#d4af37;--gold-dark:#a77c16;--green:#2f6b45;--red:#a3322b;--shadow:0 22px 60px rgba(72,45,24,.09);--radius:18px;--ease:cubic-bezier(.22,1,.36,1)}*{box-sizing:border-box}body{margin:0;background:var(--cream);color:var(--text);font-family:Inter,system-ui,sans-serif;line-height:1.5}.admin-shell{min-height:100vh;display:flex}.sidebar{position:fixed;z-index:20;inset:0 auto 0 0;width:264px;background:linear-gradient(165deg,#2c1810,#402719 60%,#25140d);color:#f7efe2;padding:28px 18px;display:flex;flex-direction:column;box-shadow:14px 0 50px rgba(44,24,16,.12)}.brand{padding:4px 14px 30px;border-bottom:1px solid rgba(255,239,205,.14);text-decoration:none}.brand strong{display:block;font:600 2rem 'Cormorant Garamond',serif;letter-spacing:.18em;color:#f8e8bf}.brand small{color:#c9b9a3;letter-spacing:.18em;text-transform:uppercase;font-size:.62rem}.nav-group{margin-top:28px}.nav-label{padding:0 14px 10px;color:#bcae9e;text-transform:uppercase;letter-spacing:.13em;font-size:.65rem}.nav-link,.nav-disabled{display:flex;align-items:center;gap:12px;padding:12px 14px;border-radius:12px;text-decoration:none;color:#d8ccbc;font-size:.88rem;margin:3px 0;transition:transform .25s var(--ease),background .25s,color .25s}.nav-link i,.nav-disabled i{width:18px;text-align:center;color:#c3a55f}.nav-link:hover{background:rgba(255,244,216,.09);color:#fff;transform:translateX(3px)}.nav-link.active{background:linear-gradient(100deg,rgba(212,175,55,.95),rgba(170,126,24,.95));color:#2c1810;box-shadow:0 10px 24px rgba(212,175,55,.2);font-weight:700}.nav-link.active i{color:#2c1810}.nav-disabled{opacity:.48;cursor:not-allowed}.sidebar-footer{margin-top:auto;padding:16px 14px;border-top:1px solid rgba(255,239,205,.14);color:#bcae9e;font-size:.75rem}.main{width:calc(100% - 264px);margin-left:264px}.topbar{height:76px;background:rgba(255,253,249,.9);backdrop-filter:blur(18px);border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 clamp(20px,4vw,48px);position:sticky;top:0;z-index:10}.breadcrumb{font-size:.77rem;color:var(--muted);display:flex;gap:8px;align-items:center}.breadcrumb strong{color:var(--ink)}.top-actions{display:flex;align-items:center;gap:12px}.top-search{display:flex;align-items:center;background:var(--cream-2);border:1px solid transparent;border-radius:999px;padding:0 14px;color:var(--muted)}.top-search:focus-within{background:var(--paper);border-color:var(--gold)}.top-search input{border:0;outline:0;background:transparent;padding:10px 8px;width:190px;color:var(--ink);font:inherit}.icon-button{width:38px;height:38px;border:1px solid var(--line);background:var(--paper);border-radius:50%;display:grid;place-items:center;color:var(--text);text-decoration:none;transition:transform .25s var(--ease),border-color .2s,box-shadow .2s}.icon-button:hover{transform:translateY(-2px);border-color:var(--gold);box-shadow:0 8px 18px rgba(72,45,24,.12)}.profile-chip{display:flex;align-items:center;gap:9px;color:var(--ink);font-size:.82rem;font-weight:600}.avatar{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;background:var(--ink);color:#f7e7b9;font-size:.82rem}.content{padding:clamp(24px,4vw,48px);max-width:1580px;margin:auto}.page-heading{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin-bottom:30px}.eyebrow{font-size:.7rem;text-transform:uppercase;letter-spacing:.19em;color:var(--gold-dark);font-weight:700;margin-bottom:7px}.page-heading h1{font:600 clamp(2.05rem,4vw,3.25rem)/.95 'Cormorant Garamond',serif;color:var(--ink);margin:0}.page-heading p{margin:10px 0 0;color:var(--muted);max-width:650px}.button{display:inline-flex;align-items:center;justify-content:center;gap:9px;border:0;text-decoration:none;border-radius:11px;padding:12px 17px;font:600 .82rem Inter,sans-serif;cursor:pointer;transition:transform .28s var(--ease),box-shadow .28s var(--ease),background .2s}.button:hover{transform:translateY(-2px)}.button-primary{background:linear-gradient(110deg,#d4af37,#b88618);color:#fff;box-shadow:0 12px 24px rgba(167,124,22,.22)}.button-light{background:var(--paper);border:1px solid var(--line);color:var(--text)}.button-danger{background:#f9e9e6;color:var(--red);border:1px solid #ecc8c1}.button-small{padding:8px 11px;border-radius:9px;font-size:.73rem}.message{display:flex;align-items:center;gap:10px;border-radius:13px;padding:13px 16px;margin-bottom:24px;font-size:.86rem}.message-success{background:#edf6ee;color:var(--green);border:1px solid #cce4d0}.message-error{background:#fff0ed;color:var(--red);border:1px solid #efcbc4}.stats-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-bottom:28px}.stat-card{position:relative;overflow:hidden;background:var(--paper);border:1px solid var(--line);border-radius:var(--radius);padding:20px;box-shadow:var(--shadow);transition:transform .35s var(--ease),box-shadow .35s var(--ease),border-color .2s}.stat-card:hover{transform:translateY(-5px);box-shadow:0 28px 50px rgba(72,45,24,.14);border-color:#d6bd7a}.stat-card:after{content:"";position:absolute;width:110px;height:110px;border-radius:50%;right:-40px;top:-50px;background:radial-gradient(circle,rgba(212,175,55,.18),transparent 70%)}.stat-top{display:flex;justify-content:space-between;align-items:center;color:var(--muted);font-size:.78rem}.stat-icon{color:var(--gold-dark);font-size:1rem}.stat-value{font:600 2rem/1.1 'Cormorant Garamond',serif;color:var(--ink);margin-top:14px}.stat-note{font-size:.72rem;color:var(--muted);margin-top:5px}.panel{background:rgba(255,253,249,.88);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:24px}.panel-heading{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;margin-bottom:20px}.panel-heading h2{margin:0;color:var(--ink);font:600 1.55rem/1.05 'Cormorant Garamond',serif}.panel-heading p{margin:5px 0 0;color:var(--muted);font-size:.78rem}.filters{display:grid;grid-template-columns:minmax(240px,1fr) repeat(2,minmax(170px,.5fr)) auto;gap:10px;align-items:end;margin-bottom:22px}.field label{display:block;color:var(--muted);font-size:.68rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;margin:0 0 7px}.field input,.field select{width:100%;border:1px solid var(--line);background:var(--paper);border-radius:10px;padding:11px 12px;color:var(--ink);font:inherit;font-size:.8rem;outline:0;transition:border .2s,box-shadow .2s}.field input:focus,.field select:focus{border-color:var(--gold);box-shadow:0 0 0 3px rgba(212,175,55,.13)}.form-layout{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(280px,.8fr);gap:20px}.form-section{background:var(--paper);border:1px solid var(--line);border-radius:16px;padding:22px;margin-bottom:16px}.form-section h2{font:600 1.35rem 'Cormorant Garamond',serif;color:var(--ink);margin:0 0 5px}.form-section p{font-size:.75rem;color:var(--muted);margin:0 0 18px}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:15px}.form-control{width:100%;border:1px solid var(--line);background:var(--paper);border-radius:10px;padding:11px 12px;color:var(--ink);font:inherit;font-size:.8rem;outline:0}.form-control:focus{border-color:var(--gold);box-shadow:0 0 0 3px rgba(212,175,55,.13)}.table-wrap{overflow:auto}.data-table{width:100%;border-collapse:collapse;min-width:920px}.data-table th{text-align:left;color:var(--muted);font-size:.67rem;text-transform:uppercase;letter-spacing:.1em;padding:0 12px 13px}.data-table td{padding:14px 12px;border-top:1px solid var(--line);font-size:.8rem;vertical-align:middle}.data-table td:first-child{font-weight:700;color:var(--ink)}.data-table tbody tr{transition:background .2s}.data-table tbody tr:hover{background:#fffaf1}.badge{display:inline-flex;align-items:center;gap:5px;border-radius:999px;padding:5px 9px;font-size:.68rem;font-weight:700;white-space:nowrap}.badge-success{background:#e9f4eb;color:var(--green)}.badge-warning{background:#fff3d8;color:#8a5a00}.badge-danger{background:#f9e5e2;color:var(--red)}.badge-neutral{background:#f0ebe3;color:var(--muted)}.badge-info{background:#e6f1f5;color:#2a6375}.action-row{display:flex;gap:7px;align-items:center;flex-wrap:wrap}.select-assign{border:1px solid var(--line);background:var(--paper);border-radius:8px;padding:8px;color:var(--ink);font:inherit;font-size:.72rem;min-width:170px}.empty{padding:45px;text-align:center;color:var(--muted);font-size:.85rem}.empty i{display:block;color:var(--gold);font-size:2rem;margin-bottom:10px}.driver-avatar{width:36px;height:36px;border-radius:12px;background:var(--cream-2);color:var(--gold-dark);display:grid;place-items:center;float:left;margin-right:10px}.tabs{display:flex;gap:8px;margin-bottom:20px}.tab{border:1px solid var(--line);background:var(--paper);color:var(--muted);padding:10px 14px;border-radius:10px;text-decoration:none;font-size:.78rem;font-weight:600}.tab.active,.tab:hover{background:var(--ink);border-color:var(--ink);color:#fff}.assignment-note{padding:13px 16px;background:#eef7f6;color:#2a6375;border:1px solid #c8e5e2;border-radius:12px;font-size:.78rem;margin-bottom:20px}@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;transition-duration:.01ms!important}.button:hover,.stat-card:hover{transform:none}}@media(max-width:900px){.sidebar{width:82px;padding:20px 10px}.brand{padding:5px 0 22px;text-align:center}.brand strong{font-size:1rem;letter-spacing:.12em}.brand small,.nav-label,.nav-link span,.nav-disabled span,.sidebar-footer{display:none}.nav-link,.nav-disabled{justify-content:center;padding:13px}.nav-link i,.nav-disabled i{width:auto}.main{width:calc(100% - 82px);margin-left:82px}.form-layout{grid-template-columns:1fr}.filters{grid-template-columns:1fr 1fr}.filters .search-field{grid-column:1/-1}}@media(max-width:680px){.topbar{padding:0 16px}.top-search{display:none}.profile-chip span{display:none}.content{padding:24px 15px}.page-heading{align-items:flex-start;flex-direction:column}.page-heading .button{width:100%}.stats-grid{grid-template-columns:1fr;gap:10px}.form-grid{grid-template-columns:1fr}.filters{grid-template-columns:1fr}.filters .search-field{grid-column:auto}.filters .button{width:100%}.panel{padding:17px}.tabs{overflow:auto}}
 </style>
 </head>
 <body>
-
-<!-- TOPBAR -->
-<div class="topbar">
-    <div class="topbar-title">
-        <i class="fas fa-motorcycle"></i>Gestion des Livreurs
-    </div>
-    <a href="<?php echo SITE_URL; ?>pages/admin/admin.php" class="btn-back">
-        <i class="fas fa-arrow-left"></i> Retour Admin
-    </a>
-</div>
-
-<div class="wrapper">
-
-    <!-- ALERTES -->
-    <?php if ($success_msg): ?>
-    <div class="alert alert-success"><i class="bi bi-check-circle-fill"></i><?= htmlspecialchars($success_msg) ?></div>
-    <?php endif; ?>
-    <?php if ($error_msg): ?>
-    <div class="alert alert-error"><i class="bi bi-x-circle-fill"></i><?= htmlspecialchars($error_msg) ?></div>
-    <?php endif; ?>
-
-    <!-- STATS -->
-    <div class="stats-grid">
-        <div class="stat-card">
-            <div class="stat-icon"><i class="fas fa-users"></i></div>
-            <div class="stat-value"><?= count($livreurs) ?></div>
-            <div class="stat-label">Total livreurs</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-icon"><i class="fas fa-check-circle"></i></div>
-            <div class="stat-value"><?= $nb_actifs ?></div>
-            <div class="stat-label">Livreurs actifs</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-icon"><i class="fas fa-box-open"></i></div>
-            <div class="stat-value"><?= $nb_assignees ?></div>
-            <div class="stat-label">Commandes assignées</div>
-        </div>
-    </div>
-
-    <!-- TABS -->
-    <div class="tabs">
-        <button class="tab-btn active" onclick="showTab('livreurs', this)">
-            <i class="fas fa-motorcycle"></i> Livreurs
-        </button>
-        <button class="tab-btn" onclick="showTab('commandes', this)">
-            <i class="fas fa-box"></i> Assignation commandes
-        </button>
-    </div>
-
-    <!-- ======================================================= -->
-    <!-- TAB 1 : GESTION DES LIVREURS                            -->
-    <!-- ======================================================= -->
-    <div id="tab-livreurs">
-
-        <!-- FORMULAIRE AJOUT / MODIFICATION -->
-        <div class="form-card">
-            <?php if ($edit_livreur): ?>
-                <!-- MODE MODIFICATION -->
-                <div class="section-title">
-                    <i class="bi bi-pencil-square"></i> Modifier le livreur
-                </div>
-                <form method="POST">
-                    <input type="hidden" name="id_livreur" value="<?= $edit_livreur['id_livreur'] ?>">
-                    <div class="form-grid">
-                        <div class="form-group">
-                            <label>Prénom</label>
-                            <input type="text" name="prenom" value="<?= htmlspecialchars($edit_livreur['prenom']) ?>" required>
-                        </div>
-                        <div class="form-group">
-                            <label>Nom</label>
-                            <input type="text" name="nom" value="<?= htmlspecialchars($edit_livreur['nom']) ?>" required>
-                        </div>
-                        <div class="form-group">
-                            <label>Téléphone</label>
-                            <input type="text" name="telephone" value="<?= htmlspecialchars($edit_livreur['telephone']) ?>" required>
-                        </div>
-                        <div class="form-group">
-                            <label>Zone de livraison</label>
-                            <input type="text" name="zone_livraison" value="<?= htmlspecialchars($edit_livreur['zone_livraison']) ?>" placeholder="Ex: Paris 1er - 5ème" required>
-                        </div>
-                        <div class="form-group">
-                            <label>Véhicule</label>
-                            <select name="vehicule">
-                                <?php foreach (['Vélo','Scooter','Voiture','Camionnette'] as $v): ?>
-                                <option value="<?= $v ?>" <?= $edit_livreur['vehicule'] === $v ? 'selected' : '' ?>><?= $v ?></option>
-                                <?php endforeach; ?>
-                            </select>
-                        </div>
-                        <div class="form-group">
-                            <label>Statut</label>
-                            <select name="statut">
-                                <option value="actif"   <?= $edit_livreur['statut'] === 'actif'   ? 'selected' : '' ?>>✅ Actif</option>
-                                <option value="inactif" <?= $edit_livreur['statut'] === 'inactif' ? 'selected' : '' ?>>⏸ Inactif</option>
-                            </select>
-                        </div>
-                        <div class="form-group">
-                            <label>Prix livraison (€)</label>
-                            <input type="number" name="prix_livraison" step="0.01" min="0"
-                                   value="<?= number_format($edit_livreur['prix_livraison'] ?? 5.90, 2, '.', '') ?>" required>
-                        </div>
-                    </div>
-                    <div style="display:flex; gap:12px;">
-                        <button type="submit" name="action_modifier" class="btn btn-gold">
-                            <i class="bi bi-save"></i> Enregistrer
-                        </button>
-                        <a href="livreurs.php" class="btn btn-cancel">
-                            <i class="bi bi-x"></i> Annuler
-                        </a>
-                    </div>
-                </form>
-
-            <?php else: ?>
-                <!-- MODE AJOUT -->
-                <div class="section-title">
-                    <i class="bi bi-plus-circle"></i> Ajouter un livreur
-                </div>
-                <form method="POST">
-                    <div class="form-grid">
-                        <div class="form-group">
-                            <label>Prénom</label>
-                            <input type="text" name="prenom" placeholder="Lucas" required>
-                        </div>
-                        <div class="form-group">
-                            <label>Nom</label>
-                            <input type="text" name="nom" placeholder="Dupont" required>
-                        </div>
-                        <div class="form-group">
-                            <label>Téléphone</label>
-                            <input type="text" name="telephone" placeholder="06 XX XX XX XX" required>
-                        </div>
-                        <div class="form-group">
-                            <label>Zone de livraison</label>
-                            <input type="text" name="zone_livraison" placeholder="Ex: Paris 1er - 5ème" required>
-                        </div>
-                        <div class="form-group">
-                            <label>Véhicule</label>
-                            <select name="vehicule">
-                                <option value="Vélo">🚲 Vélo</option>
-                                <option value="Scooter" selected>🛵 Scooter</option>
-                                <option value="Voiture">🚗 Voiture</option>
-                                <option value="Camionnette">🚐 Camionnette</option>
-                            </select>
-                        </div>
-                        <div class="form-group">
-                            <label>Statut</label>
-                            <select name="statut">
-                                <option value="actif">✅ Actif</option>
-                                <option value="inactif">⏸ Inactif</option>
-                            </select>
-                        </div>
-                        <div class="form-group">
-                            <label>Prix livraison (€)</label>
-                            <input type="number" name="prix_livraison" step="0.01" min="0" value="5.90" required placeholder="5.90">
-                        </div>
-                    </div>
-                    <button type="submit" name="action_ajouter" class="btn btn-gold">
-                        <i class="bi bi-plus-circle"></i> Ajouter le livreur
-                    </button>
-                </form>
-            <?php endif; ?>
-        </div>
-
-        <!-- TABLEAU DES LIVREURS -->
-        <div class="table-card">
-            <div class="section-title" style="padding: 20px 24px 0;">
-                <i class="fas fa-list"></i> Liste des livreurs (<?= count($livreurs) ?>)
-            </div>
-
-            <?php if (empty($livreurs)): ?>
-            <div class="empty-state">
-                <i class="fas fa-motorcycle"></i>
-                Aucun livreur enregistré pour l'instant.
-            </div>
-            <?php else: ?>
-            <table>
-                <thead>
-                    <tr>
-                        <th>#</th>
-                        <th>Livreur</th>
-                        <th>Téléphone</th>
-                        <th>Zone</th>
-                        <th>Véhicule</th>
-                        <th>Prix livraison</th>
-                        <th>Statut</th>
-                        <th>Actions</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <?php foreach ($livreurs as $l): ?>
-                    <?php
-                        $icone_vehicule = match($l['vehicule']) {
-                            'Vélo'        => '🚲',
-                            'Scooter'     => '🛵',
-                            'Voiture'     => '🚗',
-                            'Camionnette' => '🚐',
-                            default       => '🚚'
-                        };
-                    ?>
-                    <tr>
-                        <td style="color:#555;">#<?= $l['id_livreur'] ?></td>
-                        <td>
-                            <strong><?= htmlspecialchars($l['prenom'] . ' ' . $l['nom']) ?></strong>
-                        </td>
-                        <td><?= htmlspecialchars($l['telephone']) ?></td>
-                        <td style="color:#bbb;"><?= htmlspecialchars($l['zone_livraison']) ?></td>
-                        <td><?= $icone_vehicule ?> <?= htmlspecialchars($l['vehicule']) ?></td>
-                        <td style="color:#d4a017; font-weight:700;">
-                            <?= number_format($l['prix_livraison'] ?? 5.90, 2, ',', ' ') ?> €
-                        </td>
-                        <td>
-                            <span class="badge badge-<?= $l['statut'] ?>">
-                                <?= $l['statut'] === 'actif' ? '✅ Actif' : '⏸ Inactif' ?>
-                            </span>
-                        </td>
-                        <td>
-                            <a href="livreurs.php?edit=<?= $l['id_livreur'] ?>" class="btn btn-edit">
-                                <i class="bi bi-pencil"></i> Modifier
-                            </a>
-                            <form method="POST" style="display:inline;" onsubmit="return confirm('Supprimer ce livreur ? Les commandes associées seront désassignées.')">
-                                <input type="hidden" name="id_livreur_suppr" value="<?= $l['id_livreur'] ?>">
-                                <button type="submit" name="action_supprimer" class="btn btn-delete">
-                                    <i class="bi bi-trash"></i> Supprimer
-                                </button>
-                            </form>
-                        </td>
-                    </tr>
-                    <?php endforeach; ?>
-                </tbody>
-            </table>
-            <?php endif; ?>
-        </div>
-
-    </div><!-- /tab-livreurs -->
-
-
-    <!-- ======================================================= -->
-    <!-- TAB 2 : ASSIGNATION LIVREUR → COMMANDE                  -->
-    <!-- ======================================================= -->
-    <div id="tab-commandes" style="display:none;">
-
-        <div class="table-card">
-            <div class="section-title" style="padding: 20px 24px 0;">
-                <i class="fas fa-box"></i> Assigner un livreur aux commandes
-            </div>
-
-            <?php if (empty($commandes)): ?>
-            <div class="empty-state">
-                <i class="fas fa-box-open"></i>
-                Aucune commande trouvée.
-            </div>
-            <?php else: ?>
-            <table>
-                <thead>
-                    <tr>
-                        <th>N° Commande</th>
-                        <th>Client</th>
-                        <th>Date</th>
-                        <th>Montant</th>
-                        <th>Statut</th>
-                        <th>Livreur assigné</th>
-                        <th>Action</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <?php foreach ($commandes as $cmd):
-                        $badge_statut = match($cmd['statut']) {
-                            'en_attente' => 'badge-attente',
-                            'livree'     => 'badge-livree',
-                            'expediee'   => 'badge-expediee',
-                            'annulee'    => 'badge-annulee',
-                            default      => 'badge-attente'
-                        };
-                        $label_statut = match($cmd['statut']) {
-                            'en_attente' => '⏳ En attente',
-                            'confirmee'  => '✅ Confirmée',
-                            'en_cours'   => '🔄 En cours',
-                            'expediee'   => '📦 Expédiée',
-                            'livree'     => '✅ Livrée',
-                            'annulee'    => '❌ Annulée',
-                            default      => ucfirst($cmd['statut'])
-                        };
-                    ?>
-                    <tr>
-                        <td style="font-weight:700; color:#d4a017;"><?= htmlspecialchars($cmd['numero_commande']) ?></td>
-                        <td><?= htmlspecialchars($cmd['client']) ?></td>
-                        <td style="color:#888; font-size:0.85rem;"><?= date('d/m/Y', strtotime($cmd['date_commande'])) ?></td>
-                        <td style="color:#fff;"><?= number_format($cmd['montant'], 2, ',', ' ') ?> €</td>
-                        <td><span class="badge <?= $badge_statut ?>"><?= $label_statut ?></span></td>
-                        <td>
-                            <?php if ($cmd['livreur_nom']): ?>
-                                <span class="badge badge-actif">🛵 <?= htmlspecialchars($cmd['livreur_nom']) ?></span>
-                            <?php else: ?>
-                                <span class="badge badge-aucun">Non assigné</span>
-                            <?php endif; ?>
-                        </td>
-                        <td>
-                            <form method="POST" style="display:flex; align-items:center; gap:8px;">
-                                <input type="hidden" name="id_commande" value="<?= $cmd['id_commande'] ?>">
-                                <select name="id_livreur" class="select-assign">
-                                    <option value="">— Aucun —</option>
-                                    <?php foreach ($livreurs as $l):
-                                        if ($l['statut'] !== 'actif') continue; ?>
-                                    <option value="<?= $l['id_livreur'] ?>" <?= $cmd['id_livreur'] == $l['id_livreur'] ? 'selected' : '' ?>>
-                                        <?= htmlspecialchars($l['prenom'] . ' ' . $l['nom']) ?>
-                                    </option>
-                                    <?php endforeach; ?>
-                                </select>
-                                <button type="submit" name="action_assigner" class="btn btn-gold" style="padding:6px 14px; font-size:0.82rem;">
-                                    <i class="bi bi-check2"></i> Ok
-                                </button>
-                            </form>
-                        </td>
-                    </tr>
-                    <?php endforeach; ?>
-                </tbody>
-            </table>
-            <?php endif; ?>
-        </div>
-
-    </div><!-- /tab-commandes -->
-
-</div><!-- /wrapper -->
-
-<script>
-function showTab(name, btn) {
-    // Cacher tous les tabs
-    document.getElementById('tab-livreurs').style.display  = 'none';
-    document.getElementById('tab-commandes').style.display = 'none';
-
-    // Afficher le bon
-    document.getElementById('tab-' + name).style.display = 'block';
-
-    // Mettre à jour les boutons
-    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-}
-</script>
-
-</body>
-</html>
+<div class="admin-shell">
+<aside class="sidebar"><a class="brand" href="<?= $adminPath ?>?tab=dashboard"><strong>LUMOURA</strong><small>Maison de parfumerie</small></a><div class="nav-group"><div class="nav-label">Administration</div><a class="nav-link" href="<?= $adminPath ?>?tab=dashboard"><i class="fas fa-chart-line"></i><span>Vue d’ensemble</span></a><a class="nav-link" href="<?= $adminPath ?>?tab=produits"><i class="fas fa-spray-can-sparkles"></i><span>Produits</span></a><a class="nav-link" href="<?= $adminPath ?>?tab=commandes"><i class="fas fa-box-open"></i><span>Commandes</span></a><a class="nav-link active" href="livreurs.php"><i class="fas fa-motorcycle"></i><span>Livreurs</span></a></div><div class="nav-group"><div class="nav-label">Développement</div><div class="nav-disabled"><i class="fas fa-layer-group"></i><span>Catégories & collections</span></div><div class="nav-disabled"><i class="fas fa-users"></i><span>Clients</span></div><div class="nav-disabled"><i class="fas fa-warehouse"></i><span>Stocks</span></div><div class="nav-disabled"><i class="fas fa-percent"></i><span>Promotions</span></div><div class="nav-disabled"><i class="fas fa-sliders"></i><span>Paramètres</span></div></div><div class="sidebar-footer"><i class="fas fa-shield-heart"></i> Espace sécurisé<br><span>Palette Lumoura conservée</span></div></aside>
+<main class="main"><header class="topbar"><div class="breadcrumb"><span>Back-office</span><i class="fas fa-chevron-right" style="font-size:.6rem"></i><strong><?= $section === 'commandes' ? 'Affectations' : 'Livreurs' ?></strong></div><div class="top-actions"><form class="top-search" method="get" action="livreurs.php"><input type="hidden" name="section" value="<?= $section ?>"><i class="fas fa-search"></i><input name="q" value="<?= lm_escape($search) ?>" placeholder="Rechercher…" aria-label="Rechercher"></form><a class="icon-button" href="<?= $shopPath ?>" title="Accéder à la boutique"><i class="fas fa-store"></i></a><div class="profile-chip"><div class="avatar"><?= lm_escape($initial) ?></div><span><?= lm_escape($displayName) ?></span></div></div></header><section class="content">
+<?php if ($successMessage): ?><div class="message message-success"><i class="fas fa-circle-check"></i><span><?= lm_escape($successMessage) ?></span></div><?php endif; ?><?php if ($errorMessage): ?><div class="message message-error"><i class="fas fa-circle-exclamation"></i><span><?= lm_escape($errorMessage) ?></span></div><?php endif; ?>
+<div class="page-heading"><div><div class="eyebrow">Opérations · logistique</div><h1><?= $section === 'commandes' ? 'Affectation des commandes' : 'Gestion des livreurs' ?></h1><p><?= $section === 'commandes' ? 'Affectez chaque commande au bon partenaire et gardez une vision claire de la livraison.' : 'Centralisez les profils, les zones et la disponibilité de votre équipe de livraison.' ?></p></div><a class="button button-light" href="<?= $adminPath ?>?tab=dashboard"><i class="fas fa-arrow-left"></i>Retour au tableau de bord</a></div>
+<div class="stats-grid"><div class="stat-card"><div class="stat-top"><span>Total livreurs</span><i class="stat-icon fas fa-users"></i></div><div class="stat-value"><?= count($drivers) ?></div><div class="stat-note">Profils correspondant à la recherche</div></div><div class="stat-card"><div class="stat-top"><span>Livreurs actifs</span><i class="stat-icon fas fa-circle-check"></i></div><div class="stat-value"><?= $activeDrivers ?></div><div class="stat-note">Disponibles pour une affectation</div></div><div class="stat-card"><div class="stat-top"><span>Commandes assignées</span><i class="stat-icon fas fa-box-open"></i></div><div class="stat-value"><?= $assignedOrders ?></div><div class="stat-note">Sur les commandes récentes</div></div></div>
+<div class="tabs"><a class="tab <?= $section === 'livreurs' ? 'active' : '' ?>" href="livreurs.php?section=livreurs"><i class="fas fa-motorcycle"></i> Livreurs</a><a class="tab <?= $section === 'commandes' ? 'active' : '' ?>" href="livreurs.php?section=commandes"><i class="fas fa-box"></i> Affectation commandes</a></div>
+<?php if ($section === 'livreurs'): ?>
+<div class="form-layout"><div><?php $formDriver = $editDriver ?: []; ?><div class="form-section"><h2><?= $editDriver ? 'Modifier le livreur' : 'Ajouter un livreur' ?></h2><p><?= $editDriver ? 'Mettez à jour les informations opérationnelles de ce partenaire.' : 'Créez un profil clair pour faciliter les affectations.' ?></p><form method="post"><input type="hidden" name="id_livreur" value="<?= (int) ($formDriver['id_livreur'] ?? 0) ?>"><div class="form-grid"><div class="field"><label>Prénom</label><input class="form-control" name="prenom" required value="<?= lm_escape($formDriver['prenom'] ?? '') ?>" placeholder="Lucas"></div><div class="field"><label>Nom</label><input class="form-control" name="nom" required value="<?= lm_escape($formDriver['nom'] ?? '') ?>" placeholder="Dupont"></div><div class="field"><label>Téléphone</label><input class="form-control" name="telephone" required value="<?= lm_escape($formDriver['telephone'] ?? '') ?>" placeholder="06 XX XX XX XX"></div><div class="field"><label>Zone de livraison</label><input class="form-control" name="zone_livraison" required value="<?= lm_escape($formDriver['zone_livraison'] ?? '') ?>" placeholder="Paris 1er - 5e"></div><div class="field"><label>Véhicule</label><select class="form-control" name="vehicule"><?php foreach (['Vélo','Scooter','Voiture','Camionnette'] as $vehicle): ?><option value="<?= $vehicle ?>" <?= ($formDriver['vehicule'] ?? 'Scooter') === $vehicle ? 'selected' : '' ?>><?= $vehicle ?></option><?php endforeach; ?></select></div><div class="field"><label>Statut</label><select class="form-control" name="statut"><option value="actif" <?= ($formDriver['statut'] ?? 'actif') === 'actif' ? 'selected' : '' ?>>Actif</option><option value="inactif" <?= ($formDriver['statut'] ?? '') === 'inactif' ? 'selected' : '' ?>>Inactif</option></select></div><div class="field"><label>Prix livraison (€)</label><input class="form-control" type="number" name="prix_livraison" step="0.01" min="0" required value="<?= number_format((float) ($formDriver['prix_livraison'] ?? 5.90), 2, '.', '') ?>"></div></div><div style="display:flex;gap:10px;justify-content:flex-end;margin-top:18px;flex-wrap:wrap"><a class="button button-light" href="livreurs.php">Réinitialiser</a><button class="button button-primary" type="submit" name="<?= $editDriver ? 'action_modifier' : 'action_ajouter' ?>"><i class="fas fa-<?= $editDriver ? 'save' : 'plus' ?>"></i><?= $editDriver ? 'Enregistrer' : 'Ajouter le livreur' ?></button></div></form></div></div><aside class="panel"><div class="panel-heading"><div><h2>Repères logistiques</h2><p>Une équipe lisible pour un service plus fluide.</p></div></div><div class="assignment-note"><i class="fas fa-lightbulb"></i> Gardez les zones et les statuts à jour pour réduire les erreurs d’affectation.</div><div style="font-size:.8rem;color:var(--muted);line-height:1.8"><strong style="color:var(--ink);display:block">Bon réflexe</strong>Utilisez l’onglet Affectation commandes pour désigner rapidement un livreur actif. Les livreurs inactifs restent visibles dans la liste, mais ne sont pas proposés pour les nouvelles affectations.</div></aside></div>
+<div class="panel" style="margin-top:20px"><div class="panel-heading"><div><h2>Équipe de livraison</h2><p><?= count($drivers) ?> profil(s) affiché(s), avec accès direct aux actions.</p></div></div><?php if (!$drivers): ?><div class="empty"><i class="fas fa-motorcycle"></i>Aucun livreur ne correspond à la recherche.</div><?php else: ?><div class="table-wrap"><table class="data-table"><thead><tr><th>Livreur</th><th>Téléphone</th><th>Zone</th><th>Véhicule</th><th>Tarif</th><th>Statut</th><th>Actions</th></tr></thead><tbody><?php foreach ($drivers as $driver): $vehicleIcon = match ($driver['vehicule'] ?? '') { 'Vélo' => 'fa-bicycle', 'Scooter' => 'fa-motorcycle', 'Voiture' => 'fa-car', 'Camionnette' => 'fa-truck' , default => 'fa-truck-fast' }; ?><tr><td><div class="driver-avatar"><i class="fas <?= $vehicleIcon ?>"></i></div><strong><?= lm_escape(($driver['prenom'] ?? '') . ' ' . ($driver['nom'] ?? '')) ?></strong><br><span style="color:var(--muted);font-size:.7rem">#<?= (int) $driver['id_livreur'] ?></span></td><td><?= lm_escape($driver['telephone']) ?></td><td><?= lm_escape($driver['zone_livraison']) ?></td><td><?= lm_escape($driver['vehicule']) ?></td><td><strong><?= number_format((float) ($driver['prix_livraison'] ?? 5.90), 2, ',', ' ') ?> €</strong></td><td><span class="badge <?= ($driver['statut'] ?? '') === 'actif' ? 'badge-success' : 'badge-neutral' ?>"><i class="fas <?= ($driver['statut'] ?? '') === 'actif' ? 'fa-circle-check' : 'fa-pause' ?>"></i><?= ($driver['statut'] ?? '') === 'actif' ? 'Actif' : 'Inactif' ?></span></td><td><div class="action-row"><a class="button button-light button-small" href="livreurs.php?edit=<?= (int) $driver['id_livreur'] ?>"><i class="fas fa-pen"></i>Modifier</a><form method="post" onsubmit="return confirm('Supprimer ce livreur ? Ses commandes seront désassignées.');"><input type="hidden" name="id_livreur_suppr" value="<?= (int) $driver['id_livreur'] ?>"><button class="button button-danger button-small" name="action_supprimer"><i class="fas fa-trash"></i></button></form></div></td></tr><?php endforeach; ?></tbody></table></div><?php endif; ?></div>
+<?php else: ?>
+<div class="panel"><div class="panel-heading"><div><h2>Commandes à affecter</h2><p><?= count($orders) ?> commande(s) récente(s), recherche comprise.</p></div><a class="button button-light button-small" href="<?= $adminPath ?>?tab=commandes"><i class="fas fa-list"></i>Voir les commandes</a></div><div class="assignment-note"><i class="fas fa-circle-info"></i> Seuls les livreurs actifs sont proposés dans le sélecteur. Choisissez « Aucun » pour désassigner une commande.</div><?php if (!$orders): ?><div class="empty"><i class="fas fa-box-open"></i>Aucune commande ne correspond à la recherche.</div><?php else: ?><div class="table-wrap"><table class="data-table"><thead><tr><th>Commande</th><th>Client</th><th>Date</th><th>Montant</th><th>Statut</th><th>Livreur actuel</th><th>Affecter</th></tr></thead><tbody><?php foreach ($orders as $order): $status = $order['statut'] ?? ''; ?><tr><td><?= lm_escape($order['numero_commande'] ?: '#' . $order['id_commande']) ?></td><td><?= lm_escape($order['client']) ?></td><td><?= !empty($order['date_commande']) ? date('d/m/Y', strtotime($order['date_commande'])) : '—' ?></td><td><?= number_format((float) $order['montant'], 2, ',', ' ') ?> €</td><td><span class="badge <?= $status === 'livree' ? 'badge-success' : ($status === 'annulee' ? 'badge-danger' : 'badge-warning') ?>"><?= lm_escape(lm_status_label($status)) ?></span></td><td><?= $order['livreur_nom'] ? '<span class="badge badge-info"><i class="fas fa-motorcycle"></i> ' . lm_escape($order['livreur_nom']) . '</span>' : '<span class="badge badge-neutral">Non assigné</span>' ?></td><td><form class="action-row" method="post"><input type="hidden" name="id_commande" value="<?= (int) $order['id_commande'] ?>"><select class="select-assign" name="id_livreur"><option value="">Aucun livreur</option><?php foreach ($drivers as $driver): if (($driver['statut'] ?? '') !== 'actif') continue; ?><option value="<?= (int) $driver['id_livreur'] ?>" <?= (int) $order['id_livreur'] === (int) $driver['id_livreur'] ? 'selected' : '' ?>><?= lm_escape(($driver['prenom'] ?? '') . ' ' . ($driver['nom'] ?? '')) ?></option><?php endforeach; ?></select><button class="button button-primary button-small" name="action_assigner"><i class="fas fa-check"></i></button></form></td></tr><?php endforeach; ?></tbody></table></div><?php endif; ?></div>
+<?php endif; ?>
+</section></main></div>
+</body></html>

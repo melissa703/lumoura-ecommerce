@@ -1,768 +1,265 @@
 <?php
 // ============================================================
-// FICHIER : commande.php
-// RÔLE    : Page de finalisation de commande
-// CORRECTIONS :
-//   1. Statut 'en attente' (avec espace) — conforme à l'ENUM MySQL
-//   2. Vérification stock AVANT de démarrer la transaction
-//   3. Constante LIVRAISON_GRATUITE_SEUIL centralisée (150€)
-//   4. Suppression du double décrément de stock
-//      (le trigger after_order_detail_insert s'en charge automatiquement)
+// FICHIER : pages/admin/commandes.php
+// RÔLE    : gestion des commandes (liste, recherche, filtre par
+//           statut, détail des articles, changement de statut
+//           avec e-mail automatique au client)
+// SÉCURITÉ: accès admin vérifié en base, CSRF sur tout POST,
+//           requêtes préparées, statuts en liste blanche
 // ============================================================
 
-require_once '../includes/config.php';
-require_once '../includes/db.php';
-require_once '../includes/functions.php';
+require_once '../../includes/config.php';
+require_once '../../includes/db.php';
+require_once '../../includes/functions.php';
+require_once '../../includes/security.php';
+require_once '../../includes/images.php';
+require_once '../../includes/envoyer-email.php';
+require_once '_layout.php';
 
-// ✅ CORRECTION : Constante centralisée — modifier ici pour tout le site
-if (!defined('LIVRAISON_GRATUITE_SEUIL')) {
-    define('LIVRAISON_GRATUITE_SEUIL', 150);
+send_security_headers();
+$admin = require_admin($pdo, '../connexion.php');
+
+// statut en base => [libellé, classe CSS]
+$STATUTS = [
+    'en attente' => ['En attente', 'st-attente'],
+    'payee'      => ['Payée',      'st-payee'],
+    'expediee'   => ['Expédiée',   'st-expediee'],
+    'livree'     => ['Livrée',     'st-livree'],
+    'annulee'    => ['Annulée',    'st-annulee'],
+];
+$NOTIFIABLES = ['expediee', 'livree', 'annulee'];   // statuts qui préviennent le client par e-mail
+$PAR_PAGE    = 20;
+
+// Filtres (GET) : recherche, statut, page
+$q = trim((string)($_GET['q'] ?? ''));
+$f = (string)($_GET['f'] ?? '');
+if ($f !== '' && !isset($STATUTS[$f])) $f = '';
+$page = max(1, (int)($_GET['p'] ?? 1));
+
+/** Adresse de la page avec les filtres courants (pour les liens et les retours après action). */
+function cmd_url(array $over = []): string {
+    global $q, $f, $page;
+    $params = array_merge(['q' => $q, 'f' => $f, 'p' => $page], $over);
+    $params = array_filter($params, static fn($v) => $v !== '' && $v !== 1 && $v !== null);
+    return 'commandes.php' . ($params ? '?' . http_build_query($params) : '');
 }
 
-// Vérification de connexion obligatoire pour passer commande
-if (!isLoggedIn()) {
-    $_SESSION['login_redirect'] = 'Veuillez vous connecter pour passer commande.';
-    header('Location: connexion.php');
-    exit();
-}
+// ------------------------------------------------------------
+// ACTION : changement de statut (POST)
+// ------------------------------------------------------------
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    csrf_check();
+    $idCommande = (int)($_POST['id_commande'] ?? 0);
+    $statut     = (string)($_POST['statut'] ?? '');
 
-$user_id         = $_SESSION['user_id'];
-$success_message = '';
-$error_message   = '';
+    // On revient sur la même vue (mêmes filtres) après l'action
+    $q    = trim((string)($_POST['q'] ?? ''));
+    $f    = (string)($_POST['f'] ?? '');
+    if ($f !== '' && !isset($STATUTS[$f])) $f = '';
+    $page = max(1, (int)($_POST['p'] ?? 1));
 
-// SECTION 1 : Récupérer les infos de l'utilisateur
-try {
-    $user_stmt = $pdo->prepare("SELECT * FROM utilisateurs WHERE id_utilisateur = ?");
-    $user_stmt->execute([$user_id]);
-    $user = $user_stmt->fetch();
-} catch (PDOException $e) {
-    $error_message = 'Erreur lors du chargement des informations utilisateur.';
-    $user = null;
-}
+    if ($idCommande <= 0 || !isset($STATUTS[$statut])) {
+        flash_set('err', 'Statut invalide.');
+        header('Location: ' . cmd_url()); exit;
+    }
 
-// SECTION 2 : Récupérer toutes les adresses de l'utilisateur
-try {
-    $addr_stmt = $pdo->prepare("
-        SELECT * FROM adresses 
-        WHERE id_utilisateur = ? 
-        ORDER BY est_principale DESC, date_creation DESC
-    ");
-    $addr_stmt->execute([$user_id]);
-    $adresses = $addr_stmt->fetchAll();
+    try {
+        $old = $pdo->prepare(
+            "SELECT c.statut, c.numero_commande, u.email, u.prenom
+             FROM commandes c JOIN utilisateurs u ON u.id_utilisateur = c.id_utilisateur
+             WHERE c.id_commande = ?"
+        );
+        $old->execute([$idCommande]);
+        $data = $old->fetch(PDO::FETCH_ASSOC);
 
-    $adresse_principale = null;
-    foreach ($adresses as $addr) {
-        if ($addr['est_principale'] == 1) {
-            $adresse_principale = $addr;
-            break;
+        if (!$data) {
+            flash_set('err', 'Commande introuvable.');
+            header('Location: ' . cmd_url()); exit;
         }
-    }
-    if (!$adresse_principale && !empty($adresses)) {
-        $adresse_principale = $adresses[0];
-    }
-} catch (PDOException $e) {
-    $adresses = [];
-    $adresse_principale = null;
-}
 
-// SECTION 3 : Récupérer le panier et calculer les totaux
-try {
-    $cart_query = "
-        SELECT 
-            p.*,
-            pan.quantite,
-            pan.id_panier,
-            pan.id_format,
-            f.prix      AS prix_format,   -- prix du FORMAT choisi (et non produits.prix)
-            f.volume_ml AS volume_format  -- contenance choisie (30 / 50 / 100 ml)
-        FROM panier pan
-        JOIN produits p ON pan.id_produit = p.id_produit
-        JOIN produit_formats f ON f.id_format = pan.id_format
-        WHERE pan.id_utilisateur = ?
-        ORDER BY pan.date_ajout DESC
-    ";
-    $cart_stmt = $pdo->prepare($cart_query);
-    $cart_stmt->execute([$user_id]);
-    $cart_items = $cart_stmt->fetchAll(PDO::FETCH_ASSOC);
+        if ($data['statut'] === $statut) {
+            flash_set('ok', 'Le statut était déjà « ' . $STATUTS[$statut][0] . ' ».');
+            header('Location: ' . cmd_url()); exit;
+        }
 
-    $subtotal    = 0;
-    $total_items = 0;
+        $pdo->prepare("UPDATE commandes SET statut = ? WHERE id_commande = ?")->execute([$statut, $idCommande]);
+        admin_log($pdo, (int)$admin['id_utilisateur'], 'commande_statut', "commande #$idCommande : {$data['statut']} -> $statut");
 
-    foreach ($cart_items as $item) {
-        $price       = $item['prix_format'];
-        $discount    = $item['promotion_pourcentage'];
-        $final_price = $discount > 0 ? $price * (1 - $discount / 100) : $price;
-        $subtotal    += $final_price * $item['quantite'];
-        $total_items += $item['quantite'];
-    }
-
-    // ✅ CORRECTION : Utilisation de la constante centralisée
-    $shipping_cost = ($subtotal >= LIVRAISON_GRATUITE_SEUIL || $subtotal == 0) ? 0 : 5.90;
-    $total         = $subtotal + $shipping_cost;
-
-} catch (PDOException $e) {
-    $error_message = 'Erreur lors du chargement du panier.';
-    $cart_items    = [];
-    $subtotal      = 0;
-    $total         = 0;
-}
-
-if (empty($cart_items)) {
-    header('Location: panier.php');
-    exit();
-}
-
-// SECTION 3B : Récupérer les livreurs actifs
-try {
-    $liv_stmt = $pdo->query("
-        SELECT id_livreur, nom, prenom, telephone, zone_livraison, vehicule, prix_livraison
-        FROM livreurs
-        WHERE statut = 'actif'
-        ORDER BY prix_livraison ASC
-    ");
-    $livreurs_dispo = $liv_stmt->fetchAll(PDO::FETCH_ASSOC);
-} catch (PDOException $e) {
-    $livreurs_dispo = [];
-}
-
-// SECTION 4 : Traitement de la commande (POST)
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['place_order'])) {
-
-    $prenom         = trim($_POST['prenom']         ?? '');
-    $nom            = trim($_POST['nom']            ?? '');
-    $email          = trim($_POST['email']          ?? '');
-    $telephone      = trim($_POST['telephone']      ?? '');
-    $adresse        = trim($_POST['adresse']        ?? '');
-    $code_postal    = trim($_POST['code_postal']    ?? '');
-    $ville          = trim($_POST['ville']          ?? '');
-    $pays           = trim($_POST['pays']           ?? 'France');
-    $mode_paiement  = trim($_POST['mode_paiement']  ?? 'carte');
-    $notes          = trim($_POST['notes']          ?? '');
-    $mode_livraison = trim($_POST['mode_livraison'] ?? 'standard');
-    $id_livreur     = null;
-
-    // ✅ CORRECTION : Utilisation de la constante centralisée
-    if ($subtotal >= LIVRAISON_GRATUITE_SEUIL) {
-        $shipping_cost = 0;
-    } else {
-        $shipping_cost = match($mode_livraison) {
-            'express'       => 9.90,
-            'click_collect' => 0.00,
-            default         => 4.90,
-        };
-    }
-    $total = $subtotal + $shipping_cost;
-
-    if (empty($prenom) || empty($nom) || empty($email) || empty($telephone) ||
-        empty($adresse) || empty($code_postal) || empty($ville)) {
-        $error_message = 'Veuillez remplir tous les champs obligatoires.';
-    } else {
-        try {
-            // ✅ CORRECTION : Vérification du stock AVANT de démarrer la transaction
-            // Évite de bloquer la commande à mi-chemin si un article est en rupture
-            $stock_errors = [];
-            // Le stock est commun à tous les formats d'un parfum : on additionne les quantités par produit
-            $qte_par_produit = [];
-            foreach ($cart_items as $item) {
-                $qte_par_produit[$item['id_produit']] = ($qte_par_produit[$item['id_produit']] ?? 0) + $item['quantite'];
-            }
-            foreach ($qte_par_produit as $id_prod => $qte_demandee) {
-                $stock_check = $pdo->prepare("SELECT nom, stock FROM produits WHERE id_produit = ?");
-                $stock_check->execute([$id_prod]);
-                $produit_stock = $stock_check->fetch();
-
-                if (!$produit_stock || $produit_stock['stock'] < $qte_demandee) {
-                    $dispo = $produit_stock['stock'] ?? 0;
-                    $stock_errors[] = '"' . htmlspecialchars($produit_stock['nom'] ?? 'Produit inconnu') . '" : '
-                        . $dispo . ' en stock, vous en demandez ' . $qte_demandee;
-                }
-            }
-
-            if (!empty($stock_errors)) {
-                $error_message = 'Stock insuffisant pour : ' . implode(' | ', $stock_errors)
-                    . '. Veuillez ajuster votre panier.';
+        $msg = 'Commande ' . $data['numero_commande'] . ' : statut « ' . $STATUTS[$statut][0] . ' ».';
+        $type = 'ok';
+        if (in_array($statut, $NOTIFIABLES, true)) {
+            $envoye = envoyerEmailStatut($data['email'], $data['prenom'], $data['numero_commande'], $statut);
+            if ($envoye) {
+                $msg .= ' E-mail envoyé au client.';
             } else {
-                $pdo->beginTransaction();
-
-                $numero_commande  = 'CMD-' . date('Y') . '-' . strtoupper(substr(uniqid(), -8));
-                $adresse_complete = "$adresse, $code_postal $ville, $pays";
-
-                // ✅ CORRECTION 1 : statut = 'en attente' (avec espace, conforme à l'ENUM MySQL)
-                // Avant : 'en_attente' avec underscore → ne correspond pas à l'ENUM → statut vide !
-                $order_query = "
-                    INSERT INTO commandes (
-                        numero_commande,
-                        id_utilisateur,
-                        statut,
-                        montant,
-                        frais_livraison,
-                        mode_paiement,
-                        adresse_livraison,
-                        notes,
-                        id_livreur
-                    ) VALUES (?, ?, 'en attente', ?, ?, ?, ?, ?, ?)
-                ";
-                $order_stmt = $pdo->prepare($order_query);
-                $order_stmt->execute([
-                    $numero_commande,
-                    $user_id,
-                    $total,
-                    $shipping_cost,
-                    $mode_paiement,
-                    $adresse_complete,
-                    $notes,
-                    $id_livreur
-                ]);
-
-                $order_id = $pdo->lastInsertId();
-
-                foreach ($cart_items as $item) {
-                    $price       = $item['prix_format'];
-                    $discount    = $item['promotion_pourcentage'];
-                    $final_price = $discount > 0 ? $price * (1 - $discount / 100) : $price;
-
-                    $detail_stmt = $pdo->prepare("
-                        INSERT INTO details_commande (
-                            id_commande, id_produit, volume_ml, quantite, prix_unitaire
-                        ) VALUES (?, ?, ?, ?, ?)
-                    ");
-                    // volume_ml + prix_unitaire = photo du format acheté (l'historique reste juste même si les tarifs changent)
-                    $detail_stmt->execute([$order_id, $item['id_produit'], $item['volume_format'], $item['quantite'], $final_price]);
-
-                    // ✅ CORRECTION 4 : Le trigger SQL after_order_detail_insert décrémente
-                    // automatiquement le stock après chaque INSERT dans details_commande.
-                    // Le UPDATE manuel est donc supprimé pour éviter un double décrément.
-                }
-
-                // Vider le panier de l'utilisateur
-                $clear_stmt = $pdo->prepare("DELETE FROM panier WHERE id_utilisateur = ?");
-                $clear_stmt->execute([$user_id]);
-
-                $pdo->commit();
-
-                $_SESSION['order_success'] = "Votre commande #$order_id a été passée avec succès !";
-                header("Location: confirmation.php?order_id=$order_id");
-                exit();
+                $msg .= " Attention : l'e-mail au client n'a pas pu partir (vérifie la configuration SMTP).";
+                $type = 'err';
+                error_log("[Lumoura admin commandes] échec e-mail commande #$idCommande");
             }
-
-        } catch (PDOException $e) {
-            $pdo->rollBack();
-            $error_message = 'Erreur lors de la création de la commande : ' . $e->getMessage();
         }
+        flash_set($type, $msg);
+    } catch (PDOException $e) {
+        error_log('[Lumoura admin commandes] ' . $e->getMessage());
+        flash_set('err', "Une erreur est survenue, le statut n'a pas été modifié.");
     }
+    header('Location: ' . cmd_url()); exit;
 }
 
-$pageTitle = "Finaliser ma commande - Lumoura";
-include '../includes/header.php';
+// ------------------------------------------------------------
+// DONNÉES D'AFFICHAGE
+// ------------------------------------------------------------
+// Compteurs par statut (pastilles de filtre)
+$counts = array_fill_keys(array_keys($STATUTS), 0);
+foreach ($pdo->query("SELECT statut, COUNT(*) AS n FROM commandes GROUP BY statut")->fetchAll() as $r) {
+    if (isset($counts[$r['statut']])) $counts[$r['statut']] = (int)$r['n'];
+}
+$totalAll = array_sum($counts);
+
+// Filtres SQL
+$where  = [];
+$params = [];
+if ($f !== '') { $where[] = 'c.statut = :statut'; $params[':statut'] = $f; }
+if ($q !== '') {
+    $like = '%' . addcslashes($q, '%_\\') . '%';
+    $where[] = '(c.numero_commande LIKE :q1 OR u.nom LIKE :q2 OR u.prenom LIKE :q3 OR u.email LIKE :q4)';
+    $params[':q1'] = $params[':q2'] = $params[':q3'] = $params[':q4'] = $like;
+}
+$whereSql = $where ? 'WHERE ' . implode(' AND ', $where) : '';
+
+$cnt = $pdo->prepare("SELECT COUNT(*) FROM commandes c JOIN utilisateurs u ON u.id_utilisateur = c.id_utilisateur $whereSql");
+$cnt->execute($params);
+$total = (int)$cnt->fetchColumn();
+$pages = max(1, (int)ceil($total / $PAR_PAGE));
+if ($page > $pages) $page = $pages;
+
+$st = $pdo->prepare(
+    "SELECT c.*, u.prenom, u.nom, u.email
+     FROM commandes c JOIN utilisateurs u ON u.id_utilisateur = c.id_utilisateur
+     $whereSql
+     ORDER BY c.date_commande DESC, c.id_commande DESC
+     LIMIT :lim OFFSET :off"
+);
+foreach ($params as $k => $v) $st->bindValue($k, $v);
+$st->bindValue(':lim', $PAR_PAGE, PDO::PARAM_INT);
+$st->bindValue(':off', ($page - 1) * $PAR_PAGE, PDO::PARAM_INT);
+$st->execute();
+$commandes = $st->fetchAll();
+
+// Articles des commandes affichées (une seule requête)
+$articles = [];
+if ($commandes) {
+    $ids = array_map(static fn($c) => (int)$c['id_commande'], $commandes);
+    $in  = implode(',', array_fill(0, count($ids), '?'));
+    $da  = $pdo->prepare(
+        "SELECT d.id_commande, d.quantite, d.prix_unitaire, p.nom, p.image_url
+         FROM details_commande d JOIN produits p ON p.id_produit = d.id_produit
+         WHERE d.id_commande IN ($in) ORDER BY d.id_detail"
+    );
+    $da->execute($ids);
+    foreach ($da->fetchAll() as $a) $articles[(int)$a['id_commande']][] = $a;
+}
+
+admin_header('Commandes', $admin, 'commandes');
 ?>
 
-<div style="padding-top: 120px; background: linear-gradient(135deg, #f5f3ef 0%, #e8e4dc 100%); min-height: 100vh;">
-    <div class="container" style="max-width: 1200px; margin: 0 auto; padding: 40px 20px;">
-
-        <!-- En-tête -->
-        <div style="text-align: center; margin-bottom: 50px;">
-            <h1 style="font-size: 2.5em; margin-bottom: 15px; color: #3a2c1f; font-weight: bold;">
-                <i class="fas fa-lock" style="color: #d4a017; margin-right: 15px;"></i>
-                Finaliser ma commande
-            </h1>
-            <p style="font-size: 1.1em; color: #666;">
-                Plus qu'une étape avant de recevoir vos parfums d'exception
-            </p>
+    <div class="toolbar">
+        <div>
+            <h2 class="page">Commandes</h2>
+            <p class="sub"><?= $total ?> commande(s)<?= ($q !== '' || $f !== '') ? ' correspondant à votre recherche' : '' ?> · un e-mail part automatiquement au client quand la commande passe à Expédiée, Livrée ou Annulée.</p>
         </div>
-
-        <!-- Message d'erreur -->
-        <?php if ($error_message): ?>
-            <div style="padding: 20px; margin-bottom: 30px; background: #ffe6e6; border: 2px solid #ffb3b3; border-radius: 12px; color: #cc0000; text-align: center;">
-                <i class="fas fa-exclamation-circle" style="margin-right: 10px;"></i>
-                <strong><?php echo htmlspecialchars($error_message); ?></strong>
-            </div>
-        <?php endif; ?>
-
-        <!-- Layout principal : formulaire (gauche) + résumé (droite) -->
-        <form method="POST" action="commande.php" style="display: grid; grid-template-columns: 1fr 400px; gap: 40px;">
-
-            <div>
-                <!-- BLOC 1 : SÉLECTION / SAISIE D'ADRESSE -->
-                <div style="background: white; border-radius: 16px; padding: 35px; box-shadow: 0 8px 25px rgba(0,0,0,0.1); margin-bottom: 30px;">
-                    <h2 style="font-size: 1.8em; margin: 0 0 25px 0; color: #3a2c1f; border-bottom: 2px solid #d4a017; padding-bottom: 15px;">
-                        <i class="fas fa-shipping-fast" style="color: #d4a017; margin-right: 10px;"></i>
-                        Informations de livraison
-                    </h2>
-
-                    <?php if (!empty($adresses)): ?>
-                    <div style="margin-bottom: 25px; padding: 20px; background: #f8f5f0; border-radius: 12px; border: 2px solid #e8e0d0;">
-                        <p style="font-weight: bold; color: #3a2c1f; margin: 0 0 15px 0;">
-                            <i class="fas fa-map-marker-alt" style="color: #d4a017; margin-right: 8px;"></i>
-                            Mes adresses enregistrées
-                        </p>
-
-                        <?php foreach ($adresses as $addr): ?>
-                        <label style="
-                            display: flex;
-                            align-items: flex-start;
-                            gap: 12px;
-                            padding: 15px;
-                            border: 2px solid <?php echo ($adresse_principale && $addr['id_adresse'] == $adresse_principale['id_adresse']) ? '#d4a017' : '#e0e0e0'; ?>;
-                            border-radius: 10px;
-                            margin-bottom: 10px;
-                            cursor: pointer;
-                            background: <?php echo ($adresse_principale && $addr['id_adresse'] == $adresse_principale['id_adresse']) ? '#fffbf0' : 'white'; ?>;
-                            transition: all 0.3s;
-                        " onmouseover="this.style.borderColor='#d4a017'" onmouseout="if(!this.querySelector('input').checked){this.style.borderColor='#e0e0e0'}" onclick="setTimeout(function(){var r=document.querySelector('input[name=adresse_selectionnee]:checked');if(r)remplirAdresse(r);},10)">
-
-                            <input
-                                type="radio"
-                                name="adresse_selectionnee"
-                                value="<?php echo $addr['id_adresse']; ?>"
-                                <?php echo ($adresse_principale && $addr['id_adresse'] == $adresse_principale['id_adresse']) ? 'checked' : ''; ?>
-                                data-prenom="<?php echo htmlspecialchars($addr['prenom']); ?>"
-                                data-nom="<?php echo htmlspecialchars($addr['nom']); ?>"
-                                data-telephone="<?php echo htmlspecialchars($addr['telephone']); ?>"
-                                data-adresse="<?php echo htmlspecialchars($addr['adresse']); ?>"
-                                data-code_postal="<?php echo htmlspecialchars($addr['code_postal']); ?>"
-                                data-ville="<?php echo htmlspecialchars($addr['ville']); ?>"
-                                data-pays="<?php echo htmlspecialchars($addr['pays']); ?>"
-                                style="margin-top: 3px; cursor: pointer; width: 18px; height: 18px;"
-                                onchange="remplirAdresse(this)" onclick="remplirAdresse(this)"
-                            >
-
-                            <div style="flex: 1;">
-                                <div style="font-weight: bold; color: #3a2c1f; margin-bottom: 4px;">
-                                    <?php echo htmlspecialchars($addr['prenom'] . ' ' . $addr['nom']); ?>
-                                    <?php if ($addr['est_principale']): ?>
-                                        <span style="background: #d4a017; color: white; font-size: 0.7em; padding: 2px 8px; border-radius: 10px; margin-left: 8px; font-weight: bold;">
-                                            Principale
-                                        </span>
-                                    <?php endif; ?>
-                                </div>
-                                <div style="color: #555; font-size: 0.9em;">
-                                    <?php echo htmlspecialchars($addr['adresse']); ?><br>
-                                    <?php echo htmlspecialchars($addr['code_postal'] . ' ' . $addr['ville'] . ', ' . $addr['pays']); ?><br>
-                                    <?php if ($addr['telephone']): ?>
-                                        <span style="color: #888;"><i class="fas fa-phone" style="margin-right: 4px;"></i><?php echo htmlspecialchars($addr['telephone']); ?></span>
-                                    <?php endif; ?>
-                                </div>
-                            </div>
-                        </label>
-                        <?php endforeach; ?>
-
-                        <a href="profil.php?tab=adresses" style="display: inline-block; margin-top: 5px; font-size: 0.9em; color: #d4a017; text-decoration: none;">
-                            <i class="fas fa-plus-circle" style="margin-right: 5px;"></i>Gérer mes adresses
-                        </a>
-                    </div>
-                    <?php else: ?>
-                    <div style="padding: 15px; background: #fff3cd; border-radius: 10px; border: 1px solid #ffc107; margin-bottom: 20px; font-size: 0.9em; color: #856404;">
-                        <i class="fas fa-info-circle" style="margin-right: 8px;"></i>
-                        Vous n'avez pas encore d'adresse enregistrée. Remplissez le formulaire ci-dessous.
-                        <a href="profil.php?tab=adresses" style="color: #d4a017; font-weight: bold; margin-left: 5px;">Sauvegarder une adresse</a>
-                    </div>
-                    <?php endif; ?>
-
-                    <!-- Formulaire d'adresse -->
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
-                        <div>
-                            <label style="display: block; margin-bottom: 8px; font-weight: bold; color: #555;">
-                                Prénom <span style="color: #c0392b;">*</span>
-                            </label>
-                            <input type="text" id="champ_prenom" name="prenom"
-                                value="<?php echo htmlspecialchars($adresse_principale['prenom'] ?? $user['prenom'] ?? ''); ?>"
-                                required
-                                style="width: 100%; padding: 14px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 1em; box-sizing: border-box;"
-                                onfocus="this.style.borderColor='#d4a017'" onblur="this.style.borderColor='#e0e0e0'">
-                        </div>
-                        <div>
-                            <label style="display: block; margin-bottom: 8px; font-weight: bold; color: #555;">
-                                Nom <span style="color: #c0392b;">*</span>
-                            </label>
-                            <input type="text" id="champ_nom" name="nom"
-                                value="<?php echo htmlspecialchars($adresse_principale['nom'] ?? $user['nom'] ?? ''); ?>"
-                                required
-                                style="width: 100%; padding: 14px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 1em; box-sizing: border-box;"
-                                onfocus="this.style.borderColor='#d4a017'" onblur="this.style.borderColor='#e0e0e0'">
-                        </div>
-                    </div>
-
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
-                        <div>
-                            <label style="display: block; margin-bottom: 8px; font-weight: bold; color: #555;">
-                                Email <span style="color: #c0392b;">*</span>
-                            </label>
-                            <input type="email" id="champ_email" name="email"
-                                value="<?php echo htmlspecialchars($user['email'] ?? ''); ?>"
-                                required
-                                style="width: 100%; padding: 14px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 1em; box-sizing: border-box;"
-                                onfocus="this.style.borderColor='#d4a017'" onblur="this.style.borderColor='#e0e0e0'">
-                        </div>
-                        <div>
-                            <label style="display: block; margin-bottom: 8px; font-weight: bold; color: #555;">
-                                Téléphone <span style="color: #c0392b;">*</span>
-                            </label>
-                            <input type="tel" id="champ_telephone" name="telephone"
-                                value="<?php echo htmlspecialchars($adresse_principale['telephone'] ?? $user['telephone'] ?? ''); ?>"
-                                required placeholder="06 12 34 56 78"
-                                style="width: 100%; padding: 14px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 1em; box-sizing: border-box;"
-                                onfocus="this.style.borderColor='#d4a017'" onblur="this.style.borderColor='#e0e0e0'">
-                        </div>
-                    </div>
-
-                    <div style="margin-bottom: 20px;">
-                        <label style="display: block; margin-bottom: 8px; font-weight: bold; color: #555;">
-                            Adresse complète <span style="color: #c0392b;">*</span>
-                        </label>
-                        <input type="text" id="champ_adresse" name="adresse"
-                            value="<?php echo htmlspecialchars($adresse_principale['adresse'] ?? ''); ?>"
-                            required placeholder="12 Rue de la République"
-                            style="width: 100%; padding: 14px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 1em; box-sizing: border-box;"
-                            onfocus="this.style.borderColor='#d4a017'" onblur="this.style.borderColor='#e0e0e0'">
-                    </div>
-
-                    <div style="display: grid; grid-template-columns: 150px 1fr; gap: 20px; margin-bottom: 20px;">
-                        <div>
-                            <label style="display: block; margin-bottom: 8px; font-weight: bold; color: #555;">
-                                Code postal <span style="color: #c0392b;">*</span>
-                            </label>
-                            <input type="text" id="champ_code_postal" name="code_postal"
-                                value="<?php echo htmlspecialchars($adresse_principale['code_postal'] ?? ''); ?>"
-                                required placeholder="75000" maxlength="5"
-                                style="width: 100%; padding: 14px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 1em; box-sizing: border-box;"
-                                onfocus="this.style.borderColor='#d4a017'" onblur="this.style.borderColor='#e0e0e0'">
-                        </div>
-                        <div>
-                            <label style="display: block; margin-bottom: 8px; font-weight: bold; color: #555;">
-                                Ville <span style="color: #c0392b;">*</span>
-                            </label>
-                            <input type="text" id="champ_ville" name="ville"
-                                value="<?php echo htmlspecialchars($adresse_principale['ville'] ?? ''); ?>"
-                                required placeholder="Paris"
-                                style="width: 100%; padding: 14px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 1em; box-sizing: border-box;"
-                                onfocus="this.style.borderColor='#d4a017'" onblur="this.style.borderColor='#e0e0e0'">
-                        </div>
-                    </div>
-
-                    <div style="margin-bottom: 20px;">
-                        <label style="display: block; margin-bottom: 8px; font-weight: bold; color: #555;">
-                            Pays <span style="color: #c0392b;">*</span>
-                        </label>
-                        <select id="champ_pays" name="pays" required
-                            style="width: 100%; padding: 14px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 1em; cursor: pointer; box-sizing: border-box;"
-                            onfocus="this.style.borderColor='#d4a017'" onblur="this.style.borderColor='#e0e0e0'">
-                            <?php
-                            $pays_list        = ['France', 'Belgique', 'Suisse', 'Luxembourg'];
-                            $pays_selectionne = $adresse_principale['pays'] ?? 'France';
-                            foreach ($pays_list as $p):
-                            ?>
-                            <option value="<?php echo $p; ?>" <?php echo ($pays_selectionne === $p) ? 'selected' : ''; ?>>
-                                <?php echo $p; ?>
-                            </option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
-
-                    <div>
-                        <label style="display: block; margin-bottom: 8px; font-weight: bold; color: #555;">
-                            Instructions de livraison (optionnel)
-                        </label>
-                        <textarea name="notes" rows="3"
-                            placeholder="Code d'accès, étage, instructions spéciales..."
-                            style="width: 100%; padding: 14px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 1em; resize: vertical; box-sizing: border-box;"
-                            onfocus="this.style.borderColor='#d4a017'" onblur="this.style.borderColor='#e0e0e0'"></textarea>
-                    </div>
-                </div>
-
-                <!-- BLOC 2 : MODE DE LIVRAISON -->
-                <div style="background: white; border-radius: 16px; padding: 35px; box-shadow: 0 8px 25px rgba(0,0,0,0.1); margin-bottom: 30px;">
-                    <h2 style="font-size: 1.8em; margin: 0 0 25px 0; color: #3a2c1f; border-bottom: 2px solid #d4a017; padding-bottom: 15px;">
-                        <i class="fas fa-truck" style="color: #d4a017; margin-right: 10px;"></i>
-                        Mode de livraison
-                    </h2>
-
-                    <?php if ($subtotal >= LIVRAISON_GRATUITE_SEUIL): ?>
-                    <div style="padding: 12px 18px; background: #f0fdf4; border: 2px solid #86efac; border-radius: 10px; color: #166534; margin-bottom: 20px; font-size: 0.95em;">
-                        <i class="fas fa-gift" style="margin-right: 8px;"></i>
-                        Votre commande dépasse <?php echo LIVRAISON_GRATUITE_SEUIL; ?> € — <strong>livraison offerte !</strong>
-                    </div>
-                    <?php endif; ?>
-
-                    <div style="display: grid; gap: 14px;">
-
-                        <!-- STANDARD -->
-                        <label onclick="selectModeLivraison(this, 'standard', <?= $subtotal >= LIVRAISON_GRATUITE_SEUIL ? 0 : 4.90 ?>)" style="display:flex; align-items:center; gap:18px; padding:18px 20px; border:2px solid #d4a017; border-radius:12px; cursor:pointer; background:#fffbf0; transition:all 0.25s;">
-                            <input type="radio" name="mode_livraison" value="standard" checked style="width:20px; height:20px; accent-color:#d4a017; flex-shrink:0; cursor:pointer;">
-                            <div style="font-size:2em; flex-shrink:0;">&#128230;</div>
-                            <div style="flex:1;">
-                                <div style="font-weight:700; font-size:1.05em; color:#3a2c1f; margin-bottom:4px;">Livraison Standard</div>
-                                <div style="font-size:0.88em; color:#888;">Livraison en 3 à 5 jours ouvrables</div>
-                            </div>
-                            <div style="font-size:1.15em; font-weight:700; color:<?= $subtotal >= LIVRAISON_GRATUITE_SEUIL ? '#2a9d8f' : '#3a2c1f' ?>; flex-shrink:0;">
-                                <?= $subtotal >= LIVRAISON_GRATUITE_SEUIL ? 'GRATUIT' : '4,90 €' ?>
-                            </div>
-                        </label>
-
-                        <!-- EXPRESS -->
-                        <label onclick="selectModeLivraison(this, 'express', <?= $subtotal >= LIVRAISON_GRATUITE_SEUIL ? 0 : 9.90 ?>)" style="display:flex; align-items:center; gap:18px; padding:18px 20px; border:2px solid #e0e0e0; border-radius:12px; cursor:pointer; background:white; transition:all 0.25s;">
-                            <input type="radio" name="mode_livraison" value="express" style="width:20px; height:20px; accent-color:#d4a017; flex-shrink:0; cursor:pointer;">
-                            <div style="font-size:2em; flex-shrink:0;">&#9889;</div>
-                            <div style="flex:1;">
-                                <div style="font-weight:700; font-size:1.05em; color:#3a2c1f; margin-bottom:4px;">Livraison Express <span style="background:#e63946; color:white; font-size:0.7em; padding:2px 8px; border-radius:10px; margin-left:6px; vertical-align:middle;">Rapide</span></div>
-                                <div style="font-size:0.88em; color:#888;">Livraison le lendemain avant 13h</div>
-                            </div>
-                            <div style="font-size:1.15em; font-weight:700; color:<?= $subtotal >= LIVRAISON_GRATUITE_SEUIL ? '#2a9d8f' : '#3a2c1f' ?>; flex-shrink:0;">
-                                <?= $subtotal >= LIVRAISON_GRATUITE_SEUIL ? 'GRATUIT' : '9,90 €' ?>
-                            </div>
-                        </label>
-
-                        <!-- CLICK & COLLECT -->
-                        <label onclick="selectModeLivraison(this, 'click_collect', 0)" style="display:flex; align-items:center; gap:18px; padding:18px 20px; border:2px solid #e0e0e0; border-radius:12px; cursor:pointer; background:white; transition:all 0.25s;">
-                            <input type="radio" name="mode_livraison" value="click_collect" style="width:20px; height:20px; accent-color:#d4a017; flex-shrink:0; cursor:pointer;">
-                            <div style="font-size:2em; flex-shrink:0;">&#127978;</div>
-                            <div style="flex:1;">
-                                <div style="font-weight:700; font-size:1.05em; color:#3a2c1f; margin-bottom:4px;">Click & Collect <span style="background:#2a9d8f; color:white; font-size:0.7em; padding:2px 8px; border-radius:10px; margin-left:6px; vertical-align:middle;">Gratuit</span></div>
-                                <div style="font-size:0.88em; color:#888;">Retrait en boutique — 123 Avenue des Champs-Élysées, Paris</div>
-                            </div>
-                            <div style="font-size:1.15em; font-weight:700; color:#2a9d8f; flex-shrink:0;">GRATUIT</div>
-                        </label>
-
-                    </div>
-
-                    <!-- BLOC 3 : MODE DE PAIEMENT -->
-                    <div style="background: white; border-radius: 16px; padding: 35px; box-shadow: 0 8px 25px rgba(0,0,0,0.1); margin-top: 30px;">
-                        <h2 style="font-size: 1.8em; margin: 0 0 25px 0; color: #3a2c1f; border-bottom: 2px solid #d4a017; padding-bottom: 15px;">
-                            <i class="fas fa-credit-card" style="color: #d4a017; margin-right: 10px;"></i>
-                            Mode de paiement
-                        </h2>
-
-                        <div style="display: grid; gap: 15px;">
-                            <!-- Carte bancaire -->
-                            <label style="display: flex; align-items: center; padding: 20px; border: 2px solid #d4a017; border-radius: 10px; cursor: pointer; background: #f8f5f0; transition: all 0.3s;"
-                                onmouseover="this.style.borderColor='#d4a017'; this.style.background='#f8f5f0'"
-                                onmouseout="if(!this.querySelector('input').checked){this.style.borderColor='#e0e0e0'; this.style.background='white'}">
-                                <input type="radio" name="mode_paiement" value="carte" checked
-                                    style="margin-right: 15px; cursor: pointer; width: 20px; height: 20px;"
-                                    onchange="this.closest('label').style.borderColor='#d4a017'; this.closest('label').style.background='#f8f5f0'">
-                                <div style="flex: 1;">
-                                    <div style="font-weight: bold; font-size: 1.1em; margin-bottom: 5px;">
-                                        <i class="fas fa-credit-card" style="color: #d4a017; margin-right: 8px;"></i>Carte bancaire
-                                    </div>
-                                    <div style="font-size: 0.9em; color: #777;">Visa, Mastercard, American Express</div>
-                                </div>
-                                <div style="display: flex; gap: 10px; font-size: 1.8em; color: #555;">
-                                    <i class="fab fa-cc-visa"></i><i class="fab fa-cc-mastercard"></i>
-                                </div>
-                            </label>
-
-                            <!-- PayPal -->
-                            <label style="display: flex; align-items: center; padding: 20px; border: 2px solid #e0e0e0; border-radius: 10px; cursor: pointer; transition: all 0.3s;"
-                                onmouseover="this.style.borderColor='#d4a017'; this.style.background='#f8f5f0'"
-                                onmouseout="if(!this.querySelector('input').checked){this.style.borderColor='#e0e0e0'; this.style.background='white'}">
-                                <input type="radio" name="mode_paiement" value="paypal"
-                                    style="margin-right: 15px; cursor: pointer; width: 20px; height: 20px;"
-                                    onchange="this.closest('label').style.borderColor='#d4a017'; this.closest('label').style.background='#f8f5f0'">
-                                <div style="flex: 1;">
-                                    <div style="font-weight: bold; font-size: 1.1em; margin-bottom: 5px;">
-                                        <i class="fab fa-paypal" style="color: #0070ba; margin-right: 8px;"></i>PayPal
-                                    </div>
-                                    <div style="font-size: 0.9em; color: #777;">Paiement sécurisé via PayPal</div>
-                                </div>
-                                <i class="fab fa-cc-paypal" style="font-size: 1.8em; color: #0070ba;"></i>
-                            </label>
-
-                            <!-- Apple Pay -->
-                            <label style="display: flex; align-items: center; padding: 20px; border: 2px solid #e0e0e0; border-radius: 10px; cursor: pointer; transition: all 0.3s;"
-                                onmouseover="this.style.borderColor='#d4a017'; this.style.background='#f8f5f0'"
-                                onmouseout="if(!this.querySelector('input').checked){this.style.borderColor='#e0e0e0'; this.style.background='white'}">
-                                <input type="radio" name="mode_paiement" value="apple_pay"
-                                    style="margin-right: 15px; cursor: pointer; width: 20px; height: 20px;"
-                                    onchange="this.closest('label').style.borderColor='#d4a017'; this.closest('label').style.background='#f8f5f0'">
-                                <div style="flex: 1;">
-                                    <div style="font-weight: bold; font-size: 1.1em; margin-bottom: 5px;">
-                                        <i class="fab fa-apple-pay" style="color: #000; margin-right: 8px;"></i>Apple Pay
-                                    </div>
-                                    <div style="font-size: 0.9em; color: #777;">Paiement rapide et sécurisé</div>
-                                </div>
-                                <i class="fab fa-cc-apple-pay" style="font-size: 1.8em; color: #000;"></i>
-                            </label>
-                        </div>
-
-                        <div style="margin-top: 25px; padding: 20px; background: #f8f5f0; border-radius: 10px; border-left: 4px solid #2a9d8f;">
-                            <div style="display: flex; align-items: start; gap: 15px;">
-                                <i class="fas fa-shield-alt" style="color: #2a9d8f; font-size: 1.5em;"></i>
-                                <div>
-                                    <div style="font-weight: bold; margin-bottom: 5px; color: #2a9d8f;">Paiement 100% sécurisé</div>
-                                    <div style="font-size: 0.9em; color: #555;">Toutes vos transactions sont cryptées. Vos données bancaires ne sont jamais stockées sur nos serveurs.</div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- RÉSUMÉ DE COMMANDE (colonne droite) -->
-            <div style="position: sticky; top: 120px; height: fit-content;">
-                <div style="background: white; border-radius: 16px; padding: 30px; box-shadow: 0 8px 25px rgba(0,0,0,0.1);">
-                    <h3 style="margin: 0 0 25px 0; font-size: 1.5em; color: #3a2c1f; border-bottom: 2px solid #d4a017; padding-bottom: 15px;">
-                        <i class="fas fa-shopping-bag" style="color: #d4a017; margin-right: 10px;"></i>
-                        Votre commande
-                    </h3>
-
-                    <!-- Liste des articles du panier -->
-                    <div style="max-height: 300px; overflow-y: auto; margin-bottom: 20px; padding-right: 10px;">
-                        <?php foreach ($cart_items as $item):
-                            $price       = $item['prix_format'];
-                            $discount    = $item['promotion_pourcentage'];
-                            $final_price = $discount > 0 ? $price * (1 - $discount / 100) : $price;
-                        ?>
-                        <div style="display: flex; gap: 15px; margin-bottom: 20px; padding-bottom: 15px; border-bottom: 1px solid #eee;">
-                            <img src="<?php echo htmlspecialchars($item['image_url'] ?? './assets/image/default.jpg'); ?>"
-                                alt="<?php echo htmlspecialchars($item['nom']); ?>"
-                                style="width: 60px; height: 60px; object-fit: cover; border-radius: 8px;"
-                                onerror="this.src='./assets/image/default.jpg'">
-                            <div style="flex: 1;">
-                                <div style="font-weight: bold; font-size: 0.95em; margin-bottom: 5px; color: #3a2c1f;">
-                                    <?php echo htmlspecialchars($item['nom']); ?> — <?php echo (int)$item['volume_format']; ?> ml
-                                </div>
-                                <div style="font-size: 0.85em; color: #888; margin-bottom: 5px;">Quantité : <?php echo $item['quantite']; ?></div>
-                                <div style="font-weight: bold; color: #d4a017;"><?php echo formatPrice($final_price * $item['quantite']); ?></div>
-                            </div>
-                        </div>
-                        <?php endforeach; ?>
-                    </div>
-
-                    <!-- Récapitulatif montants -->
-                    <div style="margin-bottom: 25px;">
-                        <div style="display: flex; justify-content: space-between; margin-bottom: 12px; color: #555;">
-                            <span>Sous-total</span>
-                            <span style="font-weight: bold;" id="affichage-sous-total" data-value="<?php echo $subtotal; ?>"><?php echo formatPrice($subtotal); ?></span>
-                        </div>
-                        <div style="display: flex; justify-content: space-between; margin-bottom: 12px; color: #555;">
-                            <span>Livraison</span>
-                            <span id="affichage-livraison" style="font-weight: bold; color: <?php echo $shipping_cost == 0 ? '#2a9d8f' : '#555'; ?>;">
-                                <?php echo $shipping_cost == 0 ? 'GRATUIT' : formatPrice($shipping_cost); ?>
-                            </span>
-                        </div>
-                        <!-- ✅ CORRECTION : Utilise la constante centralisée -->
-                        <?php if ($subtotal < LIVRAISON_GRATUITE_SEUIL && $subtotal > 0): ?>
-                        <div style="background: #e6f7ff; padding: 10px; border-radius: 8px; margin-bottom: 15px; font-size: 0.85em; color: #0066cc;">
-                            <i class="fas fa-info-circle" style="margin-right: 5px;"></i>
-                            Ajoutez <?php echo formatPrice(LIVRAISON_GRATUITE_SEUIL - $subtotal); ?> pour la livraison gratuite
-                        </div>
-                        <?php endif; ?>
-
-                        <div id="resume-livraison" style="background: #f8f5f0; border: 1px solid #e8d8b0; border-radius: 8px; padding: 10px 14px; margin-bottom: 12px; font-size: 0.9em; color: #7a5a00;">
-                            <i class="fas fa-truck" style="margin-right: 6px; color: #d4a017;"></i>
-                            Mode : <strong id="resume-livraison-nom">📦 Livraison Standard</strong>
-                        </div>
-
-                        <div style="border-top: 2px solid #eee; padding-top: 15px; margin-top: 15px;">
-                            <div style="display: flex; justify-content: space-between; font-size: 1.4em; font-weight: bold;">
-                                <span style="color: #3a2c1f;">Total</span>
-                                <span id="affichage-total" style="color: #c0392b;"><?php echo formatPrice($total); ?></span>
-                            </div>
-                            <p style="font-size: 0.85em; color: #777; margin-top: 8px; margin-bottom: 0;">TTC, livraison incluse</p>
-                        </div>
-                    </div>
-
-                    <!-- Bouton de validation -->
-                    <button type="submit" name="place_order"
-                        style="width: 100%; background: #d4a017; color: white; border: none; padding: 18px; border-radius: 10px; font-weight: bold; font-size: 1.2em; cursor: pointer; margin-bottom: 15px; transition: background 0.3s;"
-                        onmouseover="this.style.background='#c29b15'" onmouseout="this.style.background='#d4a017'">
-                        <i class="fas fa-lock" style="margin-right: 10px;"></i>
-                        Confirmer ma commande
-                    </button>
-
-                    <a href="panier.php" style="display: block; text-align: center; color: #666; text-decoration: none; font-size: 0.95em;"
-                        onmouseover="this.style.color='#d4a017'" onmouseout="this.style.color='#666'">
-                        <i class="fas fa-arrow-left" style="margin-right: 5px;"></i>Retour au panier
-                    </a>
-
-                    <!-- Réassurance -->
-                    <div style="margin-top: 25px; padding-top: 20px; border-top: 1px solid #eee;">
-                        <div style="display: flex; flex-direction: column; gap: 12px;">
-                            <div style="display: flex; align-items: center; gap: 10px; font-size: 0.9em; color: #555;">
-                                <i class="fas fa-truck" style="color: #2a9d8f;"></i><span>Livraison en 24-48h</span>
-                            </div>
-                            <div style="display: flex; align-items: center; gap: 10px; font-size: 0.9em; color: #555;">
-                                <i class="fas fa-undo" style="color: #2a9d8f;"></i><span>Retour gratuit 30 jours</span>
-                            </div>
-                            <div style="display: flex; align-items: center; gap: 10px; font-size: 0.9em; color: #555;">
-                                <i class="fas fa-gift" style="color: #2a9d8f;"></i><span>Échantillons offerts</span>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
+        <form method="get">
+            <?php if ($f !== ''): ?><input type="hidden" name="f" value="<?= h($f) ?>"><?php endif; ?>
+            <input type="search" name="q" value="<?= h($q) ?>" placeholder="N° de commande, client, e-mail…" style="width:260px">
+            <button class="btn btn-ghost" type="submit"><i class="fas fa-search"></i> Rechercher</button>
+            <?php if ($q !== ''): ?><a class="btn btn-ghost" href="<?= h(cmd_url(['q' => '', 'p' => 1])) ?>">Effacer</a><?php endif; ?>
         </form>
     </div>
-</div>
 
-<script>
-function selectModeLivraison(label, mode, prix) {
-    document.querySelectorAll('input[name="mode_livraison"]').forEach(r => {
-        const lbl = r.closest('label');
-        if (lbl) {
-            lbl.style.borderColor = r.checked ? '#d4a017' : '#e0e0e0';
-            lbl.style.background  = r.checked ? '#fffbf0' : 'white';
-        }
+    <div class="chips">
+        <a class="chip <?= $f === '' ? 'on' : '' ?>" href="<?= h(cmd_url(['f' => '', 'p' => 1])) ?>">Toutes <small><?= $totalAll ?></small></a>
+        <?php foreach ($STATUTS as $key => [$label, $cls]): ?>
+            <a class="chip <?= $f === $key ? 'on' : '' ?>" href="<?= h(cmd_url(['f' => $key, 'p' => 1])) ?>"><?= h($label) ?> <small><?= (int)$counts[$key] ?></small></a>
+        <?php endforeach; ?>
+    </div>
+
+    <div class="card" style="overflow-x:auto">
+        <table>
+            <thead><tr><th>N° commande</th><th>Client</th><th>Date</th><th>Montant</th><th>Statut</th><th>Changer le statut</th><th></th></tr></thead>
+            <tbody>
+            <?php foreach ($commandes as $c):
+                $id  = (int)$c['id_commande'];
+                [$label, $cls] = $STATUTS[$c['statut']] ?? [(string)$c['statut'], 'st-attente'];
+                $lignes = $articles[$id] ?? []; ?>
+                <tr>
+                    <td><b><?= h($c['numero_commande'] ?: '#' . $id) ?></b></td>
+                    <td><?= h($c['prenom'] . ' ' . $c['nom']) ?><br><small style="color:var(--gray)"><?= h($c['email']) ?></small></td>
+                    <td><?= h(date('d/m/Y H:i', strtotime($c['date_commande']))) ?></td>
+                    <td><b><?= h(formatPrice($c['montant'])) ?></b></td>
+                    <td><span class="st <?= h($cls) ?>"><?= h($label) ?></span></td>
+                    <td>
+                        <form method="post" class="status-form">
+                            <?= csrf_field() ?>
+                            <input type="hidden" name="id_commande" value="<?= $id ?>">
+                            <input type="hidden" name="q" value="<?= h($q) ?>">
+                            <input type="hidden" name="f" value="<?= h($f) ?>">
+                            <input type="hidden" name="p" value="<?= (int)$page ?>">
+                            <select name="statut" aria-label="Nouveau statut">
+                                <?php foreach ($STATUTS as $key => [$lab, $cl]): ?>
+                                    <option value="<?= h($key) ?>" <?= $c['statut'] === $key ? 'selected' : '' ?>><?= h($lab) ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                            <button class="btn btn-gold btn-sm" type="submit" title="Valider et prévenir le client si nécessaire"><i class="fas fa-check"></i> Valider</button>
+                        </form>
+                    </td>
+                    <td><button type="button" class="row-toggle" data-target="detail-<?= $id ?>" aria-expanded="false" aria-label="Voir le détail"><i class="fas fa-chevron-down"></i></button></td>
+                </tr>
+                <tr class="detail-row" id="detail-<?= $id ?>" hidden>
+                    <td colspan="7">
+                        <div class="detail-box">
+                            <div class="detail-items">
+                                <?php if (!$lignes): ?>
+                                    <span style="color:var(--gray)">Aucun article enregistré pour cette commande.</span>
+                                <?php else: foreach ($lignes as $l): ?>
+                                    <div class="detail-item">
+                                        <img src="<?= h(product_image_url($l['image_url'])) ?>" alt="" loading="lazy">
+                                        <span><?= h($l['nom']) ?></span>
+                                        <span class="qty">× <?= (int)$l['quantite'] ?></span>
+                                        <b><?= h(formatPrice((float)$l['prix_unitaire'] * (int)$l['quantite'])) ?></b>
+                                    </div>
+                                <?php endforeach; endif; ?>
+                            </div>
+                            <div class="detail-meta">
+                                <div><span>Livraison :</span> <?= h($c['mode_livraison'] ?: '-') ?> (<?= h(formatPrice($c['frais_livraison'] ?? 0)) ?>)</div>
+                                <div><span>Paiement :</span> <?= h($c['mode_paiement'] ?: '-') ?></div>
+                                <div><span>Payée le :</span> <?= !empty($c['date_paiement']) ? h(date('d/m/Y', strtotime($c['date_paiement']))) : '-' ?></div>
+                                <?php if (!empty($c['notes'])): ?><div><span>Note :</span> <?= h($c['notes']) ?></div><?php endif; ?>
+                            </div>
+                        </div>
+                    </td>
+                </tr>
+            <?php endforeach; ?>
+            <?php if (!$commandes): ?><tr><td colspan="7" style="color:var(--gray)">Aucune commande ne correspond.</td></tr><?php endif; ?>
+            </tbody>
+        </table>
+    </div>
+
+    <?php if ($pages > 1): ?>
+        <div class="pager">
+            <?php if ($page > 1): ?><a class="btn btn-ghost btn-sm" href="<?= h(cmd_url(['p' => $page - 1])) ?>">← Précédent</a><?php endif; ?>
+            <span>Page <?= $page ?> sur <?= $pages ?></span>
+            <?php if ($page < $pages): ?><a class="btn btn-ghost btn-sm" href="<?= h(cmd_url(['p' => $page + 1])) ?>">Suivant →</a><?php endif; ?>
+        </div>
+    <?php endif; ?>
+
+    <script>
+    document.querySelectorAll('.row-toggle').forEach(function (b) {
+        b.addEventListener('click', function () {
+            var row = document.getElementById(b.dataset.target);
+            var open = row.hasAttribute('hidden');
+            if (open) { row.removeAttribute('hidden'); } else { row.setAttribute('hidden', ''); }
+            b.setAttribute('aria-expanded', open ? 'true' : 'false');
+        });
     });
+    </script>
 
-    const labels = {
-        'standard':     '📦 Livraison Standard',
-        'express':      '⚡ Livraison Express',
-        'click_collect':'🏪 Click & Collect'
-    };
-    const resumeNom = document.getElementById('resume-livraison-nom');
-    if (resumeNom) resumeNom.textContent = labels[mode] || mode;
-
-    const livraisonEl = document.getElementById('affichage-livraison');
-    if (livraisonEl) {
-        livraisonEl.textContent = prix === 0 ? 'GRATUIT' : prix.toFixed(2).replace('.', ',') + ' €';
-        livraisonEl.style.color = prix === 0 ? '#2a9d8f' : '#c0392b';
-    }
-
-    const sousTotalEl = document.getElementById('affichage-sous-total');
-    const sousTotal   = sousTotalEl ? parseFloat(sousTotalEl.dataset.value || 0) : 0;
-    const totalEl     = document.getElementById('affichage-total');
-    if (totalEl) {
-        const newTotal = sousTotal + prix;
-        totalEl.textContent = newTotal.toFixed(2).replace('.', ',') + ' €';
-    }
-}
-
-document.addEventListener('DOMContentLoaded', function () {
-    const radioChecked = document.querySelector('input[name="adresse_selectionnee"]:checked');
-    if (radioChecked) remplirAdresse(radioChecked);
-
-    const premierMode = document.querySelector('input[name="mode_livraison"]:checked');
-    if (premierMode) {
-        const label = premierMode.closest('label');
-        const prix  = <?= $subtotal >= LIVRAISON_GRATUITE_SEUIL ? 0 : 4.90 ?>;
-        selectModeLivraison(label, premierMode.value, prix);
-    }
-});
-
-function remplirAdresse(radio) {
-    document.getElementById('champ_prenom').value      = radio.dataset.prenom;
-    document.getElementById('champ_nom').value         = radio.dataset.nom;
-    document.getElementById('champ_telephone').value   = radio.dataset.telephone;
-    document.getElementById('champ_adresse').value     = radio.dataset.adresse;
-    document.getElementById('champ_code_postal').value = radio.dataset.code_postal;
-    document.getElementById('champ_ville').value       = radio.dataset.ville;
-
-    const selectPays = document.getElementById('champ_pays');
-    for (let option of selectPays.options) {
-        if (option.value === radio.dataset.pays) {
-            option.selected = true;
-            break;
-        }
-    }
-
-    document.querySelectorAll('input[name="adresse_selectionnee"]').forEach(r => {
-        const label = r.closest('label');
-        if (label) {
-            label.style.borderColor = r.checked ? '#d4a017' : '#e0e0e0';
-            label.style.background  = r.checked ? '#fffbf0' : 'white';
-        }
-    });
-}
-</script>
-
-<?php include '../includes/footer.php'; ?>
+<?php admin_footer();

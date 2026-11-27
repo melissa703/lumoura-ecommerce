@@ -11,7 +11,7 @@ require_once '../includes/functions.php';
 if (isset($_SESSION['user_id'])) {
     // Redirection selon le rôle si déjà connecté
     if (isset($_SESSION['role']) && $_SESSION['role'] === 'admin') {
-        header('Location: ' . SITE_URL . 'pages/admin/profil.php');
+        header('Location: ' . SITE_URL . 'pages/admin/dashboard.php');
     } else {
         header('Location: ' . SITE_URL . 'pages/index.php');
     }

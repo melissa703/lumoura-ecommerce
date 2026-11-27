@@ -4582,3 +4582,153 @@ textarea:focus-visible {
     border-color: #d4a017 !important;
     box-shadow: 0 0 0 3px rgba(212, 160, 23, 0.15) !important;
 }
+/* ============================================
+   ESPACE ADMINISTRATION LUMOURA
+   Styles communs au tableau de bord et aux commandes
+   ============================================ */
+.admin-shell {
+    color: var(--cream);
+}
+
+.admin-container {
+    width: min(1300px, calc(100% - 40px));
+}
+
+.admin-title,
+.admin-panel h2 {
+    font-family: 'Cormorant Garamond', 'Playfair Display', serif;
+    letter-spacing: .02em;
+}
+
+.admin-subtitle {
+    font-size: .96rem;
+    letter-spacing: .02em;
+}
+
+.admin-back-link,
+.admin-tab,
+.admin-stat-card,
+.admin-panel,
+.admin-status-button {
+    transition: transform .25s ease, box-shadow .25s ease, background-color .25s ease, border-color .25s ease;
+}
+
+.admin-back-link:hover {
+    background: rgba(201, 146, 42, .22) !important;
+    color: var(--gold-light) !important;
+    transform: translateY(-2px);
+}
+
+.admin-stat-card:hover {
+    transform: translateY(-4px);
+    border-color: rgba(232, 197, 106, .52) !important;
+    box-shadow: 0 12px 28px rgba(0, 0, 0, .22);
+}
+
+.admin-tab {
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.admin-tab:not(.is-active):hover {
+    background: rgba(201, 146, 42, .18) !important;
+    color: var(--gold-light) !important;
+    transform: translateY(-2px);
+}
+
+.admin-panel {
+    box-shadow: 0 12px 34px rgba(0, 0, 0, .12);
+}
+
+.admin-orders-panel {
+    overflow: hidden;
+}
+
+.admin-info-alert {
+    box-shadow: inset 0 0 0 1px rgba(144, 238, 144, .05);
+}
+
+.admin-table {
+    color: var(--cream);
+    border-spacing: 0;
+}
+
+.admin-table th {
+    background: rgba(201, 146, 42, .10);
+    color: var(--gold-light) !important;
+    font-family: 'Montserrat', sans-serif;
+    font-size: .78rem;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+.admin-table td,
+.admin-table th {
+    border-bottom: 1px solid rgba(245, 230, 195, .10);
+    vertical-align: middle;
+}
+
+.admin-table tbody tr {
+    transition: background-color .2s ease, transform .2s ease;
+}
+
+.admin-table tbody tr:hover {
+    background: rgba(201, 146, 42, .09) !important;
+}
+
+.admin-orders-table td {
+    padding-top: 14px !important;
+    padding-bottom: 14px !important;
+}
+
+.admin-status-select {
+    min-width: 132px;
+    outline: none;
+}
+
+.admin-status-select:focus {
+    border-color: var(--gold-light) !important;
+    box-shadow: 0 0 0 3px rgba(232, 197, 106, .14);
+}
+
+.admin-status-button {
+    background: linear-gradient(135deg, #2a9d8f, #237d73) !important;
+    box-shadow: 0 5px 14px rgba(42, 157, 143, .20);
+}
+
+.admin-status-button:hover {
+    background: linear-gradient(135deg, #49b7a8, #2a9d8f) !important;
+    transform: translateY(-2px);
+}
+
+.admin-alert {
+    box-shadow: 0 6px 18px rgba(0, 0, 0, .10);
+}
+
+@media (max-width: 768px) {
+    .admin-container {
+        width: min(100% - 24px, 1300px);
+        padding-left: 0 !important;
+        padding-right: 0 !important;
+    }
+
+    .admin-header {
+        align-items: flex-start !important;
+        margin-bottom: 28px !important;
+    }
+
+    .admin-title {
+        font-size: 1.75rem !important;
+    }
+
+    .admin-panel {
+        padding: 20px !important;
+    }
+
+    .admin-orders-table {
+        min-width: 920px;
+    }
+}

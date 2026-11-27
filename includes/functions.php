@@ -83,4 +83,44 @@ function sanitize($string) {
     // Convertit les caractères spéciaux en entités HTML pour éviter les injections XSS
     return htmlspecialchars($string, ENT_QUOTES, 'UTF-8');
 }
+
+/**
+ * Enregistre une action d'administration lorsqu'une table admin_logs existe.
+ *
+ * La fonction ne doit jamais bloquer une action métier si la table de journal
+ * n'a pas encore été créée. Dans ce cas, l'information est envoyée dans le
+ * journal PHP afin que l'administrateur puisse terminer la migration SQL.
+ */
+if (!function_exists('admin_log')) {
+    function admin_log(PDO $pdo, int $adminId, string $action, string $details = ''): void {
+        try {
+            static $tableExists = null;
+
+            if ($tableExists === null) {
+                $check = $pdo->prepare(
+                    "SELECT COUNT(*)
+                     FROM information_schema.tables
+                     WHERE table_schema = DATABASE()
+                       AND table_name = 'admin_logs'"
+                );
+                $check->execute();
+                $tableExists = (int)$check->fetchColumn() > 0;
+            }
+
+            if (!$tableExists) {
+                error_log('[Lumoura admin log] Table admin_logs absente : ' . $action . ' - ' . $details);
+                return;
+            }
+
+            $stmt = $pdo->prepare(
+                'INSERT INTO admin_logs (id_utilisateur, action, details, date_action)
+                 VALUES (?, ?, ?, NOW())'
+            );
+            $stmt->execute([$adminId, $action, $details]);
+        } catch (Throwable $e) {
+            // Le journal ne doit jamais annuler une opération d'administration.
+            error_log('[Lumoura admin log] ' . $e->getMessage());
+        }
+    }
+}
 ?>
